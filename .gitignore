@@ -1,0 +1,27 @@
+# Rust
+/target/
+Cargo.lock
+
+# Node.js
+node_modules/
+dist/
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# claude
+./claude
