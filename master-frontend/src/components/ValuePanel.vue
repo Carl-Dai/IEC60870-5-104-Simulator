@@ -1,12 +1,8 @@
 <script setup lang="ts">
 import { inject, computed, ref, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { dialogKey } from '../composables/useDialog'
-import type { showAlert as ShowAlert } from '../composables/useDialog'
-import type { ReceivedDataPointInfo, ControlResult, CommandType } from '../types'
+import type { ReceivedDataPointInfo, ControlResult } from '../types'
 import { getControlConfig } from '../types'
-
-const { showAlert } = inject<{ showAlert: typeof ShowAlert }>(dialogKey)!
 const selectedConnectionId = inject<Ref<string | null>>('selectedConnectionId')!
 const selectedPoints = inject<Ref<ReceivedDataPointInfo[]>>('selectedPoints')!
 

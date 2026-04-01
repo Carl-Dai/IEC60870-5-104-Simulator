@@ -1,16 +1,9 @@
 <script setup lang="ts">
-import { inject, computed, ref, watch, nextTick, type Ref, type Directive } from 'vue'
+import { inject, computed, ref, watch, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { dialogKey } from '../composables/useDialog'
 import type { showAlert as ShowAlert } from '../composables/useDialog'
 import type { DataPointInfo } from '../types'
-
-const vFocus: Directive<HTMLInputElement> = {
-  mounted(el) {
-    el.focus()
-    el.select()
-  },
-}
 
 const { showAlert } = inject<{ showAlert: typeof ShowAlert }>(dialogKey)!
 const selectedServerId = inject<Ref<string | null>>('selectedServerId')!

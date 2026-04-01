@@ -2,16 +2,15 @@
 import { ref, inject, watch, onUnmounted, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { dialogKey } from '../composables/useDialog'
-import type { showAlert as ShowAlert, showConfirm as ShowConfirm, showPrompt as ShowPrompt } from '../composables/useDialog'
+import type { showAlert as ShowAlert, showPrompt as ShowPrompt } from '../composables/useDialog'
 
 const selectedServerId = inject<Ref<string | null>>('selectedServerId')!
 const selectedServerState = inject<Ref<string>>('selectedServerState')!
 const selectedCA = inject<Ref<number | null>>('selectedCA')!
 const refreshTree = inject<() => void>('refreshTree')!
 const refreshData = inject<() => void>('refreshData')!
-const { showAlert, showConfirm, showPrompt } = inject<{
+const { showAlert, showPrompt } = inject<{
   showAlert: typeof ShowAlert
-  showConfirm: typeof ShowConfirm
   showPrompt: typeof ShowPrompt
 }>(dialogKey)!
 

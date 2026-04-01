@@ -165,12 +165,6 @@ function onScroll(e: Event) {
   containerHeight.value = el.clientHeight
 }
 
-function clearSelection() {
-  selectedRows.value = []
-  lastClickedIndex.value = -1
-  emitSelection()
-}
-
 function isSelected(point: DataPointInfo): boolean {
   return selectedRows.value.some(r => r.ioa === point.ioa)
 }
