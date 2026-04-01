@@ -89,6 +89,8 @@ async function sendGI() {
       commonAddress: ca,
     })
     refreshData()
+    // Delayed tree refresh to update category counts after data arrives
+    setTimeout(() => refreshTree(), 3000)
   } catch (e) {
     await showAlert(String(e))
   }
@@ -120,6 +122,7 @@ async function sendCounterRead() {
       commonAddress: ca,
     })
     refreshData()
+    setTimeout(() => refreshTree(), 3000)
   } catch (e) {
     await showAlert(String(e))
   }

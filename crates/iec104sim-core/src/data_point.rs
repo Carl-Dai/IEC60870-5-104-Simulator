@@ -95,6 +95,9 @@ pub struct DataPoint {
     pub quality: QualityFlags,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<DateTime<Utc>>,
+    /// Sequence number stamped on insert/update (for incremental queries).
+    #[serde(default)]
+    pub update_seq: u64,
 }
 
 impl DataPoint {
@@ -105,6 +108,7 @@ impl DataPoint {
             value: DataPointValue::default_for(asdu_type),
             quality: QualityFlags::good(),
             timestamp: Some(Utc::now()),
+            update_seq: 0,
         }
     }
 
@@ -115,6 +119,7 @@ impl DataPoint {
             value,
             quality: QualityFlags::good(),
             timestamp: Some(Utc::now()),
+            update_seq: 0,
         }
     }
 }
@@ -124,6 +129,8 @@ impl DataPoint {
 pub struct DataPointMap {
     /// Data points keyed by IOA.
     pub points: HashMap<u32, DataPoint>,
+    /// Monotonically increasing sequence counter, stamped on each insert.
+    seq_counter: u64,
 }
 
 impl DataPointMap {
@@ -139,7 +146,9 @@ impl DataPointMap {
         self.points.get_mut(&ioa)
     }
 
-    pub fn insert(&mut self, point: DataPoint) {
+    pub fn insert(&mut self, mut point: DataPoint) {
+        self.seq_counter += 1;
+        point.update_seq = self.seq_counter;
         self.points.insert(point.ioa, point);
     }
 
@@ -157,6 +166,20 @@ impl DataPointMap {
 
     pub fn is_empty(&self) -> bool {
         self.points.is_empty()
+    }
+
+    /// Current sequence counter value.
+    pub fn current_seq(&self) -> u64 {
+        self.seq_counter
+    }
+
+    /// Get points changed since the given sequence number, sorted by IOA.
+    pub fn changed_since(&self, seq: u64) -> Vec<&DataPoint> {
+        let mut pts: Vec<&DataPoint> = self.points.values()
+            .filter(|p| p.update_seq > seq)
+            .collect();
+        pts.sort_by_key(|p| p.ioa);
+        pts
     }
 
     /// Get all points for a given data category, sorted by IOA.

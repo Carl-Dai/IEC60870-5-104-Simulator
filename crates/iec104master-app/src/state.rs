@@ -55,4 +55,12 @@ pub struct ReceivedDataPointInfo {
     pub value: String,
     pub quality_iv: bool,
     pub timestamp: Option<String>,
+    pub update_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncrementalDataResponse {
+    pub seq: u64,
+    pub total_count: usize,
+    pub points: Vec<ReceivedDataPointInfo>,
 }

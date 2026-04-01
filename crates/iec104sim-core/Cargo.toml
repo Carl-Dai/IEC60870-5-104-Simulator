@@ -13,6 +13,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 log = "0.4"
 rand = "0.8"
 native-tls = "0.2"
+tokio-native-tls = "0.3.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

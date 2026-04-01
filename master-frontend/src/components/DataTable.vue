@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref, inject, watch, onMounted, onUnmounted, computed, type Ref } from 'vue'
+import { ref, inject, watch, onMounted, onUnmounted, computed, shallowRef, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { ReceivedDataPointInfo } from '../types'
+import type { ReceivedDataPointInfo, IncrementalDataResponse, CommandType, ControlResult } from '../types'
+import { getControlConfig } from '../types'
+import ControlDialog from './ControlDialog.vue'
 
 const emit = defineEmits<{
   (e: 'point-select', points: ReceivedDataPointInfo[]): void
@@ -10,192 +12,301 @@ const emit = defineEmits<{
 const selectedConnectionId = inject<Ref<string | null>>('selectedConnectionId')!
 const selectedCategory = inject<Ref<string | null>>('selectedCategory')!
 const dataRefreshKey = inject<Ref<number>>('dataRefreshKey')!
+const changedCategories = inject<Ref<Set<string>>>('changedCategories')!
+const categoryCounts = inject<Ref<Map<string, number>>>('categoryCounts')!
 
-const allPoints = ref<ReceivedDataPointInfo[]>([])
-const selectedIndices = ref<Set<number>>(new Set())
-const lastClickedIndex = ref<number>(-1)
+// === Core data: plain JS Map (not reactive) + shallow ref for display array ===
+let dataMap = new Map<number, ReceivedDataPointInfo>()
+const displayPoints = shallowRef<ReceivedDataPointInfo[]>([])
+let lastSeq = 0
+let currentConnId: string | null = null
+
+// === UI state ===
+const selectedIoas = ref<Set<number>>(new Set())
+const lastClickedIndex = ref(-1)
 const searchFilter = ref('')
-
-// Track previous values to detect changes for flash animation
-const previousValues = ref<Map<number, string>>(new Map())
 const changedIoas = ref<Set<number>>(new Set())
-let changeTimers: Map<number, number> = new Map()
+const changeTimers = new Map<number, number>()
+
+// === Virtual scroll ===
+const ROW_HEIGHT = 28
+const OVERSCAN = 10
+const scrollTop = ref(0)
+const containerHeight = ref(400)
 
 let pollTimer: number | null = null
 
-async function fetchData() {
-  if (!selectedConnectionId.value) return
-  try {
-    const data = await invoke<ReceivedDataPointInfo[]>('get_received_data', {
-      id: selectedConnectionId.value,
-    })
+// === Rebuild display array from dataMap + update category counts ===
+function updateDisplay() {
+  const arr = Array.from(dataMap.values())
+  arr.sort((a, b) => a.ioa - b.ioa)
+  displayPoints.value = arr
+  // Compute realtime category counts
+  const counts = new Map<string, number>()
+  for (const p of arr) {
+    counts.set(p.category, (counts.get(p.category) || 0) + 1)
+  }
+  categoryCounts.value = counts
+}
 
-    // Detect changes
-    const newChanged = new Set<number>()
-    for (const point of data) {
-      const prev = previousValues.value.get(point.ioa)
-      if (prev !== undefined && prev !== point.value) {
-        newChanged.add(point.ioa)
-        // Clear previous timer for this IOA
-        const existingTimer = changeTimers.get(point.ioa)
-        if (existingTimer) clearTimeout(existingTimer)
-        // Set timer to remove flash after 2 seconds
-        const timer = window.setTimeout(() => {
-          changedIoas.value.delete(point.ioa)
-          changeTimers.delete(point.ioa)
-        }, 2000)
-        changeTimers.set(point.ioa, timer)
+// === Fetch: always merge, never replace ===
+async function fetchData() {
+  const connId = selectedConnectionId.value
+  if (!connId) return
+  try {
+    const resp = await invoke<IncrementalDataResponse>('get_received_data_since', {
+      id: connId,
+      sinceSeq: lastSeq,
+    })
+    if (resp.points.length > 0) {
+      const cats = new Set<string>()
+      for (const p of resp.points) {
+        const old = dataMap.get(p.ioa)
+        if (!old || old.value !== p.value) {
+          markChanged(p.ioa)
+          cats.add(p.category)
+        }
+        dataMap.set(p.ioa, p)
+      }
+      updateDisplay()
+      // Notify tree about changed categories
+      if (cats.size > 0) {
+        const merged = new Set(changedCategories.value)
+        for (const c of cats) merged.add(c)
+        changedCategories.value = merged
       }
     }
-    // Merge new changes
-    for (const ioa of newChanged) {
-      changedIoas.value.add(ioa)
-    }
-    // Update previous values map
-    const newPrev = new Map<number, string>()
-    for (const point of data) {
-      newPrev.set(point.ioa, point.value)
-    }
-    previousValues.value = newPrev
-
-    allPoints.value = data
-  } catch (_e) { /* ignore */ }
-}
-
-function startPollTimer() {
-  stopPollTimer()
-  pollTimer = window.setInterval(fetchData, 2000)
-}
-
-function stopPollTimer() {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
+    lastSeq = resp.seq
+  } catch (e) {
+    console.warn('fetchData error:', e)
   }
+}
+
+function markChanged(ioa: number) {
+  changedIoas.value.add(ioa)
+  const prev = changeTimers.get(ioa)
+  if (prev) clearTimeout(prev)
+  changeTimers.set(ioa, window.setTimeout(() => {
+    changedIoas.value.delete(ioa)
+    changeTimers.delete(ioa)
+  }, 3000))
+}
+
+// === Poll control ===
+function startPoll() {
+  stopPoll()
+  pollTimer = window.setInterval(fetchData, 1000)
+}
+
+function stopPoll() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+}
+
+// === Only reset when connection truly changes ===
+function initConnection(connId: string) {
+  stopPoll()
+  dataMap = new Map()
+  displayPoints.value = []
+  lastSeq = 0
+  changedIoas.value.clear()
+  for (const t of changeTimers.values()) clearTimeout(t)
+  changeTimers.clear()
+  selectedIoas.value.clear()
+  emit('point-select', [])
+  currentConnId = connId
+  fetchData().then(startPoll)
 }
 
 onMounted(() => {
   if (selectedConnectionId.value) {
-    fetchData()
-    startPollTimer()
+    currentConnId = selectedConnectionId.value
+    fetchData().then(startPoll)
   }
 })
 
 onUnmounted(() => {
-  stopPollTimer()
-  // Clear all change timers
-  for (const timer of changeTimers.values()) {
-    clearTimeout(timer)
+  stopPoll()
+  for (const t of changeTimers.values()) clearTimeout(t)
+})
+
+watch(selectedConnectionId, (newId) => {
+  if (newId === currentConnId) return
+  if (!newId) {
+    stopPoll()
+    currentConnId = null
+    dataMap = new Map()
+    displayPoints.value = []
+    return
   }
-  changeTimers.clear()
+  initConnection(newId)
 })
 
-watch([selectedConnectionId], () => {
-  selectedIndices.value.clear()
-  allPoints.value = []
-  previousValues.value.clear()
-  changedIoas.value.clear()
-  emit('point-select', [])
-  stopPollTimer()
-  if (!selectedConnectionId.value) return
-  fetchData()
-  startPollTimer()
-})
+// GI / counter read just triggers an extra fetch — no reset
+watch(dataRefreshKey, fetchData)
 
-watch(dataRefreshKey, () => {
-  fetchData()
-})
-
-// Filter by category
+// === Filtered + virtual scroll ===
 const filteredPoints = computed(() => {
-  let points = allPoints.value
+  let pts = displayPoints.value
   if (selectedCategory.value) {
-    points = points.filter(p => p.category === selectedCategory.value)
+    pts = pts.filter(p => p.category === selectedCategory.value)
   }
   if (searchFilter.value) {
     const q = searchFilter.value.toLowerCase()
-    points = points.filter(p =>
+    pts = pts.filter(p =>
       p.ioa.toString().includes(q) ||
       p.asdu_type.toLowerCase().includes(q) ||
       p.value.toLowerCase().includes(q)
     )
   }
-  return points
+  return pts
 })
 
-function handleRowClick(index: number, event: MouseEvent) {
-  if (event.ctrlKey || event.metaKey) {
-    if (selectedIndices.value.has(index)) {
-      selectedIndices.value.delete(index)
-    } else {
-      selectedIndices.value.add(index)
-    }
-  } else if (event.shiftKey && lastClickedIndex.value >= 0) {
-    const start = Math.min(lastClickedIndex.value, index)
-    const end = Math.max(lastClickedIndex.value, index)
-    for (let i = start; i <= end; i++) {
-      selectedIndices.value.add(i)
-    }
-  } else {
-    selectedIndices.value.clear()
-    selectedIndices.value.add(index)
-  }
-  lastClickedIndex.value = index
-  emitSelection()
+const totalHeight = computed(() => filteredPoints.value.length * ROW_HEIGHT)
+const visibleStart = computed(() => Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - OVERSCAN))
+const visibleEnd = computed(() => {
+  const count = Math.ceil(containerHeight.value / ROW_HEIGHT) + OVERSCAN * 2
+  return Math.min(filteredPoints.value.length, visibleStart.value + count)
+})
+const visibleRows = computed(() => filteredPoints.value.slice(visibleStart.value, visibleEnd.value))
+const offsetY = computed(() => visibleStart.value * ROW_HEIGHT)
+
+function onScroll(e: Event) {
+  const el = e.target as HTMLElement
+  scrollTop.value = el.scrollTop
+  containerHeight.value = el.clientHeight
 }
 
-function emitSelection() {
-  const selected: ReceivedDataPointInfo[] = []
-  for (const idx of selectedIndices.value) {
-    if (filteredPoints.value[idx]) {
-      selected.push(filteredPoints.value[idx])
+// === Row interaction ===
+function handleRowClick(localIdx: number, event: MouseEvent) {
+  const globalIdx = visibleStart.value + localIdx
+  const point = filteredPoints.value[globalIdx]
+  if (!point) return
+  if (event.ctrlKey || event.metaKey) {
+    const s = new Set(selectedIoas.value)
+    s.has(point.ioa) ? s.delete(point.ioa) : s.add(point.ioa)
+    selectedIoas.value = s
+  } else if (event.shiftKey && lastClickedIndex.value >= 0) {
+    const s = new Set(selectedIoas.value)
+    const a = Math.min(lastClickedIndex.value, globalIdx)
+    const b = Math.max(lastClickedIndex.value, globalIdx)
+    for (let i = a; i <= b; i++) {
+      const p = filteredPoints.value[i]
+      if (p) s.add(p.ioa)
     }
+    selectedIoas.value = s
+  } else {
+    selectedIoas.value = new Set([point.ioa])
   }
+  lastClickedIndex.value = globalIdx
+  const selected = Array.from(selectedIoas.value).map(ioa => dataMap.get(ioa)!).filter(Boolean)
   emit('point-select', selected)
 }
 
-function qualityLabel(point: ReceivedDataPointInfo): string {
-  return point.quality_iv ? 'IV' : 'OK'
-}
-
-function qualityClass(point: ReceivedDataPointInfo): string {
-  return point.quality_iv ? 'quality-iv' : 'quality-ok'
-}
-
-const categoryTitle = computed(() => {
-  if (!selectedCategory.value) return '全部数据'
-  return selectedCategory.value
+const categoryTitle = computed(() => selectedCategory.value ?? '全部数据')
+const totalCount = computed(() => displayPoints.value.length)
+const filteredCount = computed(() => filteredPoints.value.length)
+const pointCountLabel = computed(() => {
+  if (!selectedCategory.value && !searchFilter.value) return `${totalCount.value} 个`
+  return `${filteredCount.value} / ${totalCount.value} 个`
 })
 
-const pointCount = computed(() => filteredPoints.value.length)
+// === Right-click context menu ===
+const contextMenu = ref<{ visible: boolean; x: number; y: number; point: ReceivedDataPointInfo | null }>({
+  visible: false, x: 0, y: 0, point: null
+})
+
+const ctxControlConfig = computed(() => {
+  if (!contextMenu.value.point) return null
+  return getControlConfig(contextMenu.value.point.category)
+})
+
+function handleRowContextMenu(localIdx: number, event: MouseEvent) {
+  event.preventDefault()
+  const globalIdx = visibleStart.value + localIdx
+  const point = filteredPoints.value[globalIdx]
+  if (!point) return
+  contextMenu.value = { visible: true, x: event.clientX, y: event.clientY, point }
+}
+
+function hideContextMenu() {
+  contextMenu.value.visible = false
+}
+
+async function getCommonAddress(): Promise<number> {
+  const conns = await invoke<any[]>('list_connections')
+  const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
+  return conn?.common_address ?? 1
+}
+
+async function ctxSendCommand(value: string, selectMode: boolean = false) {
+  const point = contextMenu.value.point
+  if (!point || !selectedConnectionId.value || !ctxControlConfig.value) return
+  hideContextMenu()
+  try {
+    const ca = await getCommonAddress()
+    await invoke<ControlResult>('send_control_command', {
+      request: {
+        connection_id: selectedConnectionId.value,
+        ioa: point.ioa,
+        common_address: ca,
+        command_type: ctxControlConfig.value.commandType,
+        value: value,
+        select: selectMode,
+      }
+    })
+  } catch (e) {
+    console.warn('Control command failed:', e)
+  }
+}
+
+function ctxCopy(text: string) {
+  navigator.clipboard.writeText(text)
+  hideContextMenu()
+}
+
+// ControlDialog state (for "自由控制...")
+const showControlDialog = ref(false)
+const controlDialogIoa = ref<number | null>(null)
+const controlDialogType = ref<CommandType | null>(null)
+
+function ctxOpenControlDialog() {
+  const point = contextMenu.value.point
+  if (!point) return
+  controlDialogIoa.value = point.ioa
+  const config = ctxControlConfig.value
+  controlDialogType.value = config?.commandType ?? null
+  hideContextMenu()
+  showControlDialog.value = true
+}
+
+// Helper: check if option matches current value for marking
+// optValue is the string from CONTROL_CONFIG options; cv is the point's value string
+function isCtxActiveOption(optValue: string): boolean {
+  const cv = contextMenu.value.point?.value?.toLowerCase() ?? ''
+  // Single point: value='true' => 'on', value='false' => 'off'
+  if (optValue === 'true') return cv === 'on'
+  if (optValue === 'false') return cv === 'off'
+  // Double point: value='0'..'3' directly compare
+  if (optValue === '0') return cv === '中间'
+  if (optValue === '1') return cv === '分'
+  if (optValue === '2') return cv === '合'
+  if (optValue === '3') return cv === '不确定'
+  return false
+}
 </script>
 
 <template>
-  <div class="data-table-container">
-    <div v-if="!selectedConnectionId" class="empty-state">
-      选择一个连接查看数据
-    </div>
-
+  <div class="data-table-container" @click="hideContextMenu">
+    <div v-if="!selectedConnectionId" class="empty-state">选择一个连接查看数据</div>
     <template v-else>
       <div class="table-header">
         <span class="header-title">{{ categoryTitle }}</span>
-        <input
-          v-model="searchFilter"
-          class="search-input"
-          type="text"
-          placeholder="搜索 IOA / 类型..."
-        />
-        <span class="point-count">{{ pointCount }} 个</span>
+        <input v-model="searchFilter" class="search-input" type="text" placeholder="搜索 IOA / 类型..." />
+        <span class="point-count">{{ pointCountLabel }}</span>
       </div>
 
-      <div v-if="allPoints.length === 0" class="empty-state">
-        <div>
-          <div>暂无数据</div>
-          <div class="empty-hint">请先发送总召唤获取数据</div>
-        </div>
-      </div>
-
-      <div v-else class="table-scroll">
+      <div class="table-scroll" @scroll="onScroll">
+        <!-- Fixed header -->
         <table class="table">
           <thead>
             <tr>
@@ -206,180 +317,163 @@ const pointCount = computed(() => filteredPoints.value.length)
               <th class="col-timestamp">时间戳</th>
             </tr>
           </thead>
-          <tbody>
-            <tr
-              v-for="(point, index) in filteredPoints"
-              :key="point.ioa"
-              :class="{
-                selected: selectedIndices.has(index),
-                'value-changed': changedIoas.has(point.ioa),
-              }"
-              @click="handleRowClick(index, $event)"
-            >
-              <td class="col-ioa">{{ point.ioa }}</td>
-              <td class="col-type">{{ point.asdu_type }}</td>
-              <td class="col-value">{{ point.value }}</td>
-              <td :class="['col-quality', qualityClass(point)]">{{ qualityLabel(point) }}</td>
-              <td class="col-timestamp">{{ point.timestamp ?? '-' }}</td>
-            </tr>
-          </tbody>
         </table>
+        <!-- Virtual scroll body -->
+        <div v-if="filteredPoints.length > 0" :style="{ height: totalHeight + 'px', position: 'relative' }">
+          <table class="table table-body" :style="{ transform: `translateY(${offsetY}px)` }">
+            <tbody>
+              <tr
+                v-for="(point, i) in visibleRows"
+                :key="point.ioa"
+                :class="{ selected: selectedIoas.has(point.ioa), 'value-changed': changedIoas.has(point.ioa) }"
+                @click="handleRowClick(i, $event)"
+                @contextmenu="handleRowContextMenu(i, $event)"
+              >
+                <td class="col-ioa">{{ point.ioa }}</td>
+                <td class="col-type">{{ point.asdu_type }}</td>
+                <td :class="['col-value', { 'value-highlight': changedIoas.has(point.ioa) }]">{{ point.value }}</td>
+                <td :class="['col-quality', point.quality_iv ? 'quality-iv' : 'quality-ok']">{{ point.quality_iv ? 'IV' : 'OK' }}</td>
+                <td class="col-timestamp">{{ point.timestamp ?? '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="empty-hint-inline">暂无数据，请先发送总召唤</div>
       </div>
     </template>
+
+    <!-- Right-click context menu -->
+    <div v-if="contextMenu.visible" class="context-menu" :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }" @click.stop>
+      <template v-if="ctxControlConfig && ctxControlConfig.options">
+        <!-- Direct execute options for discrete types -->
+        <div
+          v-for="opt in ctxControlConfig.options"
+          :key="opt.value"
+          :class="['ctx-item', { 'ctx-active': isCtxActiveOption(opt.value) }]"
+          @click="ctxSendCommand(opt.value)"
+        >
+          {{ isCtxActiveOption(opt.value) ? '&#9679; ' : '&#9675; ' }}{{ opt.label }}
+        </div>
+        <div class="ctx-divider"></div>
+        <!-- SbO options for discrete types -->
+        <div
+          v-for="opt in ctxControlConfig.options"
+          :key="'sbo-' + opt.value"
+          class="ctx-item ctx-sub"
+          @click="ctxSendCommand(opt.value, true)"
+        >
+          SbO: {{ opt.label }}
+        </div>
+        <div class="ctx-divider"></div>
+      </template>
+      <template v-else-if="ctxControlConfig">
+        <!-- Setpoint types: open dialog -->
+        <div class="ctx-item" @click="ctxOpenControlDialog">设定值...</div>
+        <div class="ctx-divider"></div>
+      </template>
+      <!-- Copy actions (always available) -->
+      <div class="ctx-item" @click="ctxCopy(String(contextMenu.point?.ioa ?? ''))">复制 IOA</div>
+      <div class="ctx-item" @click="ctxCopy(contextMenu.point?.value ?? '')">复制值</div>
+      <template v-if="ctxControlConfig">
+        <div class="ctx-divider"></div>
+        <div class="ctx-item" @click="ctxOpenControlDialog">自由控制...</div>
+      </template>
+    </div>
+
+    <!-- ControlDialog for free control / setpoint entry -->
+    <ControlDialog
+      :visible="showControlDialog"
+      :connection-id="selectedConnectionId"
+      :common-address="1"
+      :prefill-ioa="controlDialogIoa"
+      :prefill-command-type="controlDialogType"
+      @close="showControlDialog = false"
+      @sent="showControlDialog = false"
+    />
   </div>
 </template>
 
 <style scoped>
-.data-table-container {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.empty-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: #6c7086;
-  font-size: 13px;
-  text-align: center;
-}
-
-.empty-hint {
-  font-size: 11px;
-  color: #45475a;
-  margin-top: 6px;
-}
+.data-table-container { display: flex; flex-direction: column; height: 100%; }
+.empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #6c7086; font-size: 13px; }
+.empty-hint-inline { padding: 40px; text-align: center; color: #6c7086; font-size: 13px; }
 
 .table-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-bottom: 1px solid #313244;
-  flex-shrink: 0;
-  background: #1e1e2e;
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  border-bottom: 1px solid #313244; flex-shrink: 0; background: #1e1e2e;
 }
-
-.header-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #89b4fa;
-  white-space: nowrap;
-}
-
+.header-title { font-size: 12px; font-weight: 600; color: #89b4fa; white-space: nowrap; }
 .search-input {
-  flex: 1;
-  max-width: 200px;
-  padding: 3px 8px;
-  background: #313244;
+  flex: 1; max-width: 200px; padding: 3px 8px; background: #313244;
+  border: 1px solid #45475a; border-radius: 4px; color: #cdd6f4; font-size: 12px; margin-left: auto;
+}
+.search-input:focus { outline: none; border-color: #89b4fa; }
+.point-count { font-size: 11px; color: #6c7086; white-space: nowrap; }
+
+.table-scroll { flex: 1; overflow-y: auto; }
+.table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+.table thead { position: sticky; top: 0; z-index: 2; }
+.table th {
+  background: #1e1e2e; color: #6c7086; font-weight: 500;
+  padding: 6px 10px; text-align: left; border-bottom: 1px solid #313244;
+}
+.table-body { position: absolute; top: 0; left: 0; width: 100%; }
+.table tbody tr { cursor: pointer; height: 28px; }
+.table tbody tr:hover { background: #1e1e2e; }
+.table tbody tr.selected { background: #89b4fa !important; color: #1e1e2e; }
+.table tbody tr.selected td { color: #1e1e2e !important; }
+.table tbody tr.value-changed { background: rgba(250, 179, 135, 0.15); }
+.table td {
+  padding: 4px 10px; border-bottom: 1px solid #1e1e2e;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.col-ioa { font-family: 'SF Mono', 'Fira Code', monospace; width: 80px; color: #89b4fa; }
+.col-type { font-family: 'SF Mono', 'Fira Code', monospace; width: 120px; }
+.col-value { font-family: 'SF Mono', 'Fira Code', monospace; transition: color 0.3s; }
+.col-value.value-highlight { color: #fab387; font-weight: 700; }
+.col-quality { width: 50px; font-weight: 600; font-size: 11px; }
+.col-quality.quality-ok { color: #a6e3a1; }
+.col-quality.quality-iv { color: #f38ba8; }
+.col-timestamp { font-family: 'SF Mono', 'Fira Code', monospace; width: 120px; color: #6c7086; }
+
+/* Context menu */
+.context-menu {
+  position: fixed;
+  background: #1e1e2e;
   border: 1px solid #45475a;
-  border-radius: 4px;
-  color: #cdd6f4;
+  border-radius: 6px;
+  padding: 4px 0;
+  z-index: 999;
+  min-width: 150px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.ctx-item {
+  padding: 6px 14px;
+  cursor: pointer;
   font-size: 12px;
-  margin-left: auto;
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: #89b4fa;
-}
-
-.point-count {
-  font-size: 11px;
-  color: #6c7086;
+  color: #cdd6f4;
   white-space: nowrap;
 }
 
-.table-scroll {
-  flex: 1;
-  overflow-y: auto;
+.ctx-item:hover {
+  background: #313244;
 }
 
-.table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-
-.table th {
-  position: sticky;
-  top: 0;
-  background: #1e1e2e;
-  color: #6c7086;
-  font-weight: 500;
-  padding: 6px 10px;
-  text-align: left;
-  border-bottom: 1px solid #313244;
-  z-index: 1;
-}
-
-.table tbody tr {
-  cursor: pointer;
-}
-
-.table tbody tr:hover {
-  background: #1e1e2e;
-}
-
-.table tbody tr.selected {
-  background: #89b4fa;
-  color: #1e1e2e;
-}
-
-.table tbody tr.selected .col-ioa,
-.table tbody tr.selected .col-quality,
-.table tbody tr.selected .col-timestamp {
-  color: #1e1e2e;
-}
-
-.table tbody tr.value-changed {
-  animation: flash-highlight 2s ease-out;
-}
-
-@keyframes flash-highlight {
-  0% { background: rgba(250, 179, 135, 0.3); }
-  100% { background: transparent; }
-}
-
-.table td {
-  padding: 4px 10px;
-  border-bottom: 1px solid #1e1e2e;
-}
-
-.col-ioa {
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  width: 80px;
+.ctx-active {
+  font-weight: 600;
   color: #89b4fa;
 }
 
-.col-type {
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  width: 120px;
-}
-
-.col-value {
-  font-family: 'SF Mono', 'Fira Code', monospace;
-}
-
-.col-quality {
-  width: 50px;
-  font-weight: 600;
+.ctx-sub {
+  color: #6c7086;
   font-size: 11px;
 }
 
-.col-quality.quality-ok {
-  color: #a6e3a1;
-}
-
-.col-quality.quality-iv {
-  color: #f38ba8;
-}
-
-.col-timestamp {
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  width: 120px;
-  color: #6c7086;
+.ctx-divider {
+  height: 1px;
+  background: #313244;
+  margin: 4px 0;
 }
 </style>

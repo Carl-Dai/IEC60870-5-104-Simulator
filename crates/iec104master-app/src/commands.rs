@@ -1,7 +1,7 @@
-use crate::state::{AppState, ConnectionInfo, MasterConnectionState, ReceivedDataPointInfo};
+use crate::state::{AppState, ConnectionInfo, IncrementalDataResponse, MasterConnectionState, ReceivedDataPointInfo};
 use iec104sim_core::log_collector::LogCollector;
 use iec104sim_core::log_entry::LogEntry;
-use iec104sim_core::master::{MasterConfig, MasterConnection, TlsConfig};
+use iec104sim_core::master::{ControlResult, ControlStep, MasterConfig, MasterConnection, TlsConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
@@ -244,7 +244,7 @@ pub struct ControlCommandRequest {
 pub async fn send_control_command(
     state: State<'_, AppState>,
     request: ControlCommandRequest,
-) -> Result<(), String> {
+) -> Result<ControlResult, String> {
     let connections = state.connections.read().await;
     let conn = connections
         .get(&request.connection_id)
@@ -252,37 +252,204 @@ pub async fn send_control_command(
 
     let select = request.select.unwrap_or(false);
     let ca = request.common_address;
+    let ioa = request.ioa;
 
-    let result = match request.command_type.as_str() {
+    // Direct execute: send command and return immediately
+    if !select {
+        let start = std::time::Instant::now();
+        match request.command_type.as_str() {
+            "single" => {
+                let value = parse_bool(&request.value)?;
+                conn.connection.send_single_command(ioa, value, false, ca).await
+                    .map_err(|e| format!("failed to send command: {}", e))?;
+            }
+            "double" => {
+                let value = request.value.parse::<u8>().map_err(|e| format!("{}", e))?;
+                conn.connection.send_double_command(ioa, value, false, ca).await
+                    .map_err(|e| format!("failed to send command: {}", e))?;
+            }
+            "step" => {
+                let value = request.value.parse::<u8>().map_err(|e| format!("{}", e))?;
+                conn.connection.send_step_command(ioa, value, false, ca).await
+                    .map_err(|e| format!("failed to send command: {}", e))?;
+            }
+            "setpoint_normalized" => {
+                let value = request.value.parse::<f32>().map_err(|e| format!("{}", e))?;
+                conn.connection.send_setpoint_normalized(ioa, value, false, ca).await
+                    .map_err(|e| format!("failed to send command: {}", e))?;
+            }
+            "setpoint_scaled" => {
+                let value = request.value.parse::<i16>().map_err(|e| format!("{}", e))?;
+                conn.connection.send_setpoint_scaled(ioa, value, false, ca).await
+                    .map_err(|e| format!("failed to send command: {}", e))?;
+            }
+            "setpoint_float" => {
+                let value = request.value.parse::<f32>().map_err(|e| format!("{}", e))?;
+                conn.connection.send_setpoint_float(ioa, value, false, ca).await
+                    .map_err(|e| format!("failed to send command: {}", e))?;
+            }
+            _ => return Err(format!("unknown command type: {}", request.command_type)),
+        }
+        return Ok(ControlResult {
+            steps: vec![ControlStep {
+                action: "execute_sent".to_string(),
+                timestamp: chrono::Utc::now().format("%H:%M:%S%.3f").to_string(),
+            }],
+            duration_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    // SbO mode: delegate to send_control_with_sbo
+    // Build select and execute frames via the command-specific logic
+    use iec104sim_core::log_entry::FrameLabel;
+
+    match request.command_type.as_str() {
         "single" => {
-            let value = request.value.parse::<bool>()
-                .or_else(|_| match request.value.as_str() {
-                    "1" | "true" | "ON" => Ok(true),
-                    "0" | "false" | "OFF" => Ok(false),
-                    _ => Err(format!("invalid bool: {}", request.value)),
-                })
-                .map_err(|e| format!("{}", e))?;
-            conn.connection.send_single_command(request.ioa, value, select, ca).await
-                .map_err(|e| format!("failed to send command: {}", e))
+            let value = parse_bool(&request.value)?;
+            let select_frame = build_control_frames_single(ca, ioa, value, true);
+            let execute_frame = build_control_frames_single(ca, ioa, value, false);
+            conn.connection.send_control_with_sbo(
+                select_frame, execute_frame, ioa,
+                &format!("单点命令 IOA={} val={}", ioa, value),
+                FrameLabel::SingleCommand, ca,
+            ).await.map_err(|e| format!("{}", e))
         }
         "double" => {
             let value = request.value.parse::<u8>().map_err(|e| format!("{}", e))?;
-            conn.connection.send_double_command(request.ioa, value, select, ca).await
-                .map_err(|e| format!("failed to send command: {}", e))
+            let select_frame = build_control_frames_double(ca, ioa, value, true);
+            let execute_frame = build_control_frames_double(ca, ioa, value, false);
+            conn.connection.send_control_with_sbo(
+                select_frame, execute_frame, ioa,
+                &format!("双点命令 IOA={} val={}", ioa, value),
+                FrameLabel::DoubleCommand, ca,
+            ).await.map_err(|e| format!("{}", e))
+        }
+        "step" => {
+            let value = request.value.parse::<u8>().map_err(|e| format!("{}", e))?;
+            let select_frame = build_control_frames_step(ca, ioa, value, true);
+            let execute_frame = build_control_frames_step(ca, ioa, value, false);
+            conn.connection.send_control_with_sbo(
+                select_frame, execute_frame, ioa,
+                &format!("步调节命令 IOA={} val={}", ioa, value),
+                FrameLabel::StepCommand, ca,
+            ).await.map_err(|e| format!("{}", e))
+        }
+        "setpoint_normalized" => {
+            let value = request.value.parse::<f32>().map_err(|e| format!("{}", e))?;
+            let select_frame = build_control_frames_setpoint_norm(ca, ioa, value, true);
+            let execute_frame = build_control_frames_setpoint_norm(ca, ioa, value, false);
+            conn.connection.send_control_with_sbo(
+                select_frame, execute_frame, ioa,
+                &format!("归一化设定值 IOA={} val={:.4}", ioa, value),
+                FrameLabel::SetpointNormalized, ca,
+            ).await.map_err(|e| format!("{}", e))
+        }
+        "setpoint_scaled" => {
+            let value = request.value.parse::<i16>().map_err(|e| format!("{}", e))?;
+            let select_frame = build_control_frames_setpoint_scaled(ca, ioa, value, true);
+            let execute_frame = build_control_frames_setpoint_scaled(ca, ioa, value, false);
+            conn.connection.send_control_with_sbo(
+                select_frame, execute_frame, ioa,
+                &format!("标度化设定值 IOA={} val={}", ioa, value),
+                FrameLabel::SetpointScaled, ca,
+            ).await.map_err(|e| format!("{}", e))
         }
         "setpoint_float" => {
             let value = request.value.parse::<f32>().map_err(|e| format!("{}", e))?;
-            conn.connection.send_setpoint_float(request.ioa, value, ca).await
-                .map_err(|e| format!("failed to send command: {}", e))
+            let select_frame = build_control_frames_setpoint_float(ca, ioa, value, true);
+            let execute_frame = build_control_frames_setpoint_float(ca, ioa, value, false);
+            conn.connection.send_control_with_sbo(
+                select_frame, execute_frame, ioa,
+                &format!("浮点设定值 IOA={} val={:.3}", ioa, value),
+                FrameLabel::SetpointFloat, ca,
+            ).await.map_err(|e| format!("{}", e))
         }
         _ => Err(format!("unknown command type: {}", request.command_type)),
-    };
-    result
+    }
+}
+
+fn parse_bool(s: &str) -> Result<bool, String> {
+    match s {
+        "1" | "true" | "ON" => Ok(true),
+        "0" | "false" | "OFF" => Ok(false),
+        _ => s.parse::<bool>().map_err(|_| format!("invalid bool: {}", s)),
+    }
+}
+
+// Frame builders for SbO (need raw frames before SSN/RSN patching)
+fn build_control_frames_single(ca: u16, ioa: u32, value: bool, select: bool) -> Vec<u8> {
+    let ca_bytes = ca.to_le_bytes();
+    let ioa_bytes = ioa.to_le_bytes();
+    let mut sco = if value { 0x01 } else { 0x00 };
+    if select { sco |= 0x80; }
+    vec![0x68, 0x0E, 0x00, 0x00, 0x00, 0x00, 45, 0x01, 6, 0x00,
+         ca_bytes[0], ca_bytes[1], ioa_bytes[0], ioa_bytes[1], ioa_bytes[2], sco]
+}
+
+fn build_control_frames_double(ca: u16, ioa: u32, value: u8, select: bool) -> Vec<u8> {
+    let ca_bytes = ca.to_le_bytes();
+    let ioa_bytes = ioa.to_le_bytes();
+    let mut dco = value & 0x03;
+    if select { dco |= 0x80; }
+    vec![0x68, 0x0E, 0x00, 0x00, 0x00, 0x00, 46, 0x01, 6, 0x00,
+         ca_bytes[0], ca_bytes[1], ioa_bytes[0], ioa_bytes[1], ioa_bytes[2], dco]
+}
+
+fn build_control_frames_step(ca: u16, ioa: u32, value: u8, select: bool) -> Vec<u8> {
+    let ca_bytes = ca.to_le_bytes();
+    let ioa_bytes = ioa.to_le_bytes();
+    let mut rco = value & 0x03;
+    if select { rco |= 0x80; }
+    vec![0x68, 0x0E, 0x00, 0x00, 0x00, 0x00, 47, 0x01, 6, 0x00,
+         ca_bytes[0], ca_bytes[1], ioa_bytes[0], ioa_bytes[1], ioa_bytes[2], rco]
+}
+
+fn build_control_frames_setpoint_norm(ca: u16, ioa: u32, value: f32, select: bool) -> Vec<u8> {
+    let ca_bytes = ca.to_le_bytes();
+    let ioa_bytes = ioa.to_le_bytes();
+    let nva = (value * 32767.0) as i16;
+    let nva_bytes = nva.to_le_bytes();
+    let qos = if select { 0x80 } else { 0x00 };
+    vec![0x68, 0x10, 0x00, 0x00, 0x00, 0x00, 48, 0x01, 6, 0x00,
+         ca_bytes[0], ca_bytes[1], ioa_bytes[0], ioa_bytes[1], ioa_bytes[2],
+         nva_bytes[0], nva_bytes[1], qos]
+}
+
+fn build_control_frames_setpoint_scaled(ca: u16, ioa: u32, value: i16, select: bool) -> Vec<u8> {
+    let ca_bytes = ca.to_le_bytes();
+    let ioa_bytes = ioa.to_le_bytes();
+    let sva_bytes = value.to_le_bytes();
+    let qos = if select { 0x80 } else { 0x00 };
+    vec![0x68, 0x10, 0x00, 0x00, 0x00, 0x00, 49, 0x01, 6, 0x00,
+         ca_bytes[0], ca_bytes[1], ioa_bytes[0], ioa_bytes[1], ioa_bytes[2],
+         sva_bytes[0], sva_bytes[1], qos]
+}
+
+fn build_control_frames_setpoint_float(ca: u16, ioa: u32, value: f32, select: bool) -> Vec<u8> {
+    let ca_bytes = ca.to_le_bytes();
+    let ioa_bytes = ioa.to_le_bytes();
+    let val_bytes = value.to_le_bytes();
+    let qos = if select { 0x80 } else { 0x00 };
+    vec![0x68, 0x12, 0x00, 0x00, 0x00, 0x00, 50, 0x01, 6, 0x00,
+         ca_bytes[0], ca_bytes[1], ioa_bytes[0], ioa_bytes[1], ioa_bytes[2],
+         val_bytes[0], val_bytes[1], val_bytes[2], val_bytes[3], qos]
 }
 
 // ---------------------------------------------------------------------------
 // Data Commands
 // ---------------------------------------------------------------------------
+
+fn point_to_info(p: &iec104sim_core::data_point::DataPoint) -> ReceivedDataPointInfo {
+    ReceivedDataPointInfo {
+        ioa: p.ioa,
+        asdu_type: p.asdu_type.name().to_string(),
+        category: p.asdu_type.category().name().to_string(),
+        value: p.value.display(),
+        quality_iv: p.quality.iv,
+        timestamp: p.timestamp.map(|t| t.format("%H:%M:%S%.3f").to_string()),
+        update_seq: p.update_seq,
+    }
+}
 
 #[tauri::command]
 pub async fn get_received_data(
@@ -298,17 +465,35 @@ pub async fn get_received_data(
     let result: Vec<ReceivedDataPointInfo> = data
         .all_sorted()
         .iter()
-        .map(|p| ReceivedDataPointInfo {
-            ioa: p.ioa,
-            asdu_type: p.asdu_type.name().to_string(),
-            category: p.asdu_type.category().name().to_string(),
-            value: p.value.display(),
-            quality_iv: p.quality.iv,
-            timestamp: p.timestamp.map(|t| t.format("%H:%M:%S%.3f").to_string()),
-        })
+        .map(|p| point_to_info(p))
         .collect();
 
     Ok(result)
+}
+
+#[tauri::command]
+pub async fn get_received_data_since(
+    state: State<'_, AppState>,
+    id: String,
+    since_seq: u64,
+) -> Result<IncrementalDataResponse, String> {
+    let connections = state.connections.read().await;
+    let conn = connections
+        .get(&id)
+        .ok_or_else(|| format!("connection {} not found", id))?;
+
+    let data = conn.connection.received_data.read().await;
+    let points: Vec<ReceivedDataPointInfo> = data
+        .changed_since(since_seq)
+        .iter()
+        .map(|p| point_to_info(p))
+        .collect();
+
+    Ok(IncrementalDataResponse {
+        seq: data.current_seq(),
+        total_count: data.len(),
+        points,
+    })
 }
 
 // ---------------------------------------------------------------------------

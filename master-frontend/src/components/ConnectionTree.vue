@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, inject, watch, onMounted, type Ref } from 'vue'
+import { ref, inject, watch, onMounted, onUnmounted, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import type { ConnectionInfo, ReceivedDataPointInfo } from '../types'
+import type { ConnectionInfo } from '../types'
 
 const emit = defineEmits<{
   (e: 'connection-select', id: string, state: string): void
@@ -10,6 +10,31 @@ const emit = defineEmits<{
 
 const treeRefreshKey = inject<Ref<number>>('treeRefreshKey')!
 const refreshTree = inject<() => void>('refreshTree')!
+const changedCategories = inject<Ref<Set<string>>>('changedCategories')!
+const sharedCategoryCounts = inject<Ref<Map<string, number>>>('categoryCounts')!
+
+// Local flash state for categories
+const flashingCategories = ref<Set<string>>(new Set())
+const flashTimers = new Map<string, number>()
+
+watch(changedCategories, (cats) => {
+  if (cats.size === 0) return
+  for (const cat of cats) {
+    flashingCategories.value.add(cat)
+    const prev = flashTimers.get(cat)
+    if (prev) clearTimeout(prev)
+    flashTimers.set(cat, window.setTimeout(() => {
+      flashingCategories.value.delete(cat)
+      flashTimers.delete(cat)
+    }, 3000))
+  }
+  // Clear the shared set after consuming
+  changedCategories.value = new Set()
+})
+
+onUnmounted(() => {
+  for (const t of flashTimers.values()) clearTimeout(t)
+})
 
 // IEC 104 data categories matching the backend DataCategory enum display names
 const DATA_CATEGORIES = [
@@ -43,21 +68,11 @@ async function loadTree() {
     const newTree: TreeConnection[] = []
     for (const conn of conns) {
       const existing = connections.value.find(c => c.info.id === conn.id)
-
-      // Fetch data to compute category counts
-      const categoryCounts = new Map<string, number>()
-      try {
-        const data = await invoke<ReceivedDataPointInfo[]>('get_received_data', { id: conn.id })
-        for (const point of data) {
-          const cat = point.category
-          categoryCounts.set(cat, (categoryCounts.get(cat) || 0) + 1)
-        }
-      } catch (_e) { /* connection may not be ready */ }
-
+      // Use shared realtime category counts from DataTable (no backend call needed)
       newTree.push({
         info: conn,
         expanded: existing?.expanded ?? true,
-        categoryCounts,
+        categoryCounts: sharedCategoryCounts.value,
       })
     }
     connections.value = newTree
@@ -76,7 +91,7 @@ function selectConnection(conn: TreeConnection) {
 
 function selectCategory(conn: TreeConnection, cat: { key: string; label: string }) {
   selectedNodeId.value = `${conn.info.id}:${cat.key}`
-  emit('connection-select', conn.info.id, conn.info.state)
+  // Only emit category-select, not connection-select (avoids category being reset to null)
   emit('category-select', conn.info.id, cat.label)
 }
 
@@ -137,7 +152,10 @@ function stateClass(state: string): string {
         <div
           v-for="cat in DATA_CATEGORIES"
           :key="cat.key"
-          :class="['tree-node', 'tree-child', { selected: selectedNodeId === `${conn.info.id}:${cat.key}` }]"
+          :class="['tree-node', 'tree-child', {
+            selected: selectedNodeId === `${conn.info.id}:${cat.key}`,
+            'cat-flash': flashingCategories.has(cat.label),
+          }]"
           @click="selectCategory(conn, cat)"
         >
           <span class="node-label">{{ cat.label }}</span>
@@ -269,5 +287,14 @@ function stateClass(state: string): string {
 
 .ctx-item.danger {
   color: #f38ba8;
+}
+
+.cat-flash {
+  background: rgba(250, 179, 135, 0.2) !important;
+}
+
+.cat-flash .node-label {
+  color: #fab387;
+  font-weight: 600;
 }
 </style>

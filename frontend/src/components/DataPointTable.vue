@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, inject, watch, computed, nextTick, onUnmounted, type Ref } from 'vue'
+import { ref, inject, watch, computed, nextTick, onUnmounted, shallowRef, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { dialogKey } from '../composables/useDialog'
 import type { showAlert as ShowAlert } from '../composables/useDialog'
@@ -18,7 +18,14 @@ const selectedCA = inject<Ref<number | null>>('selectedCA')!
 const selectedCategory = inject<Ref<string | null>>('selectedCategory')!
 const dataRefreshKey = inject<Ref<number>>('dataRefreshKey')!
 
-const dataPoints = ref<DataPointInfo[]>([])
+// === Core data: plain JS Map + shallowRef (same pattern as master DataTable) ===
+let dataMap = new Map<number, DataPointInfo>()
+const displayPoints = shallowRef<DataPointInfo[]>([])
+const categoryCounts = inject<Ref<Map<string, number>>>('categoryCounts')!
+let currentServerId: string | null = null
+let currentCA: number | null = null
+
+// === UI state ===
 const selectedRows = ref<DataPointInfo[]>([])
 const lastClickedIndex = ref(-1)
 const editingCell = ref<{ ioa: number } | null>(null)
@@ -28,87 +35,135 @@ const searchQuery = ref('')
 const scrollContainer = ref<HTMLDivElement | null>(null)
 const showAddModal = ref(false)
 const showBatchModal = ref(false)
+const changedIoas = ref<Set<number>>(new Set())
+const changeTimers = new Map<number, number>()
 
-// Category mapping from backend category name to tree label
-const CATEGORY_MAP: Record<string, string> = {
-  'SinglePoint': '单点 (SP)',
-  'DoublePoint': '双点 (DP)',
-  'StepPosition': '步位置 (ST)',
-  'Bitstring': '位串 (BO)',
-  'Normalized': '归一化 (ME_NA)',
-  'Scaled': '标度化 (ME_NB)',
-  'ShortFloat': '浮点 (ME_NC)',
-  'IntegratedTotal': '累计量 (IT)',
+// === Virtual scroll (same pattern as master DataTable) ===
+const ROW_HEIGHT = 28
+const OVERSCAN = 10
+const scrollTop = ref(0)
+const containerHeight = ref(400)
+
+// === Rebuild display array from dataMap + update category counts ===
+function updateDisplay() {
+  const arr = Array.from(dataMap.values())
+  arr.sort((a, b) => a.ioa - b.ioa)
+  displayPoints.value = arr
+  // Compute realtime category counts — backend returns Chinese category names directly
+  const counts = new Map<string, number>()
+  for (const p of arr) {
+    counts.set(p.category, (counts.get(p.category) || 0) + 1)
+  }
+  categoryCounts.value = counts
 }
 
-const filteredPoints = computed(() => {
-  let result = dataPoints.value
+function markChanged(ioa: number) {
+  changedIoas.value.add(ioa)
+  const prev = changeTimers.get(ioa)
+  if (prev) clearTimeout(prev)
+  changeTimers.set(ioa, window.setTimeout(() => {
+    changedIoas.value.delete(ioa)
+    changeTimers.delete(ioa)
+  }, 3000))
+}
 
-  // Filter by category if selected
-  if (selectedCategory.value) {
-    result = result.filter(p => {
-      const mapped = CATEGORY_MAP[p.category]
-      return mapped === selectedCategory.value
+// === Load data points: merge into existing map, never replace ===
+async function loadDataPoints() {
+  if (!selectedServerId.value || selectedCA.value === null) return
+  try {
+    const points = await invoke<DataPointInfo[]>('list_data_points', {
+      serverId: selectedServerId.value,
+      commonAddress: selectedCA.value,
     })
+    for (const p of points) {
+      const old = dataMap.get(p.ioa)
+      if (!old || old.value !== p.value) {
+        markChanged(p.ioa)
+      }
+      dataMap.set(p.ioa, p)
+    }
+    updateDisplay()
+  } catch (e) {
+    console.error('Failed to load data points:', e)
   }
+}
 
-  // Filter by search query
+// === Watchers ===
+watch([selectedServerId, selectedCA], async ([, ], [, ]) => {
+  const srvId = selectedServerId.value
+  const ca = selectedCA.value
+  if (!srvId || ca === null) {
+    // Cleared selection
+    dataMap = new Map()
+    displayPoints.value = []
+    currentServerId = null
+    currentCA = null
+    changedIoas.value.clear()
+    for (const t of changeTimers.values()) clearTimeout(t)
+    changeTimers.clear()
+    selectedRows.value = []
+    emitSelection()
+    return
+  }
+  // Only reset if server or CA actually changed
+  if (srvId !== currentServerId || ca !== currentCA) {
+    dataMap = new Map()
+    displayPoints.value = []
+    currentServerId = srvId
+    currentCA = ca
+    changedIoas.value.clear()
+    for (const t of changeTimers.values()) clearTimeout(t)
+    changeTimers.clear()
+    selectedRows.value = []
+    emitSelection()
+  }
+  await loadDataPoints()
+})
+
+watch(dataRefreshKey, () => {
+  if (currentServerId && currentCA !== null) {
+    loadDataPoints()
+  }
+})
+
+onUnmounted(() => {
+  for (const t of changeTimers.values()) clearTimeout(t)
+})
+
+// === Filtered points ===
+const filteredPoints = computed(() => {
+  let pts = displayPoints.value
+  if (selectedCategory.value) {
+    pts = pts.filter(p => p.category === selectedCategory.value)
+  }
   const q = searchQuery.value.trim()
-  if (!q) return result
+  if (!q) return pts
   if (/^\d+$/.test(q)) {
     const num = Number(q)
-    return result.filter(p => p.ioa === num || p.ioa.toString().includes(q))
+    return pts.filter(p => p.ioa === num || p.ioa.toString().includes(q))
   }
   const lower = q.toLowerCase()
-  return result.filter(p =>
+  return pts.filter(p =>
     p.name.toLowerCase().includes(lower)
     || p.asdu_type.toLowerCase().includes(lower)
   )
 })
 
-async function loadDataPoints() {
-  if (!selectedServerId.value || selectedCA.value === null) {
-    dataPoints.value = []
-    return
-  }
-  isLoading.value = true
-  try {
-    dataPoints.value = await invoke<DataPointInfo[]>('list_data_points', {
-      serverId: selectedServerId.value,
-      commonAddress: selectedCA.value,
-    })
-  } catch (e) {
-    console.error('Failed to load data points:', e)
-    dataPoints.value = []
-  }
-  isLoading.value = false
-}
-
-watch([selectedServerId, selectedCA, selectedCategory], async () => {
-  clearSelection()
-  stopAutoRefresh()
-  await loadDataPoints()
-  if (dataPoints.value.length > 0) startAutoRefresh()
+// Virtual scroll state
+const totalHeight = computed(() => filteredPoints.value.length * ROW_HEIGHT)
+const visibleStart = computed(() => Math.max(0, Math.floor(scrollTop.value / ROW_HEIGHT) - OVERSCAN))
+const visibleEnd = computed(() => {
+  const count = Math.ceil(containerHeight.value / ROW_HEIGHT) + OVERSCAN * 2
+  return Math.min(filteredPoints.value.length, visibleStart.value + count)
 })
+const visibleRows = computed(() => filteredPoints.value.slice(visibleStart.value, visibleEnd.value))
+const offsetY = computed(() => visibleStart.value * ROW_HEIGHT)
 
-watch(dataRefreshKey, () => loadDataPoints())
-
-// Auto-refresh every 2 seconds
-let refreshTimer: number | null = null
-
-function startAutoRefresh() {
-  stopAutoRefresh()
-  refreshTimer = window.setInterval(loadDataPoints, 2000)
+function onScroll(e: Event) {
+  const el = e.target as HTMLElement
+  scrollTop.value = el.scrollTop
+  containerHeight.value = el.clientHeight
 }
-
-function stopAutoRefresh() {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
-  }
-}
-
-onUnmounted(() => stopAutoRefresh())
 
 function clearSelection() {
   selectedRows.value = []
@@ -195,7 +250,7 @@ function startEdit(point: DataPointInfo) {
 }
 
 async function commitEdit() {
-  if (!editingCell.value || !selectedServerId.value || selectedCA.value === null) return
+  if (!editingCell.value || !selectedServerId.value || currentCA === null) return
   const { ioa } = editingCell.value
   const value = editValue.value
   editingCell.value = null
@@ -203,7 +258,7 @@ async function commitEdit() {
   try {
     await invoke('update_data_point', {
       serverId: selectedServerId.value,
-      commonAddress: selectedCA.value,
+      commonAddress: currentCA,
       ioa,
       value,
     })
@@ -249,11 +304,11 @@ function closeContextMenu() {
 async function deletePoint() {
   const ioa = contextMenu.value.ioa
   contextMenu.value.show = false
-  if (!selectedServerId.value || selectedCA.value === null) return
+  if (!selectedServerId.value || currentCA === null) return
   try {
     await invoke('remove_data_point', {
       serverId: selectedServerId.value,
-      commonAddress: selectedCA.value,
+      commonAddress: currentCA,
       ioa,
     })
     if (selectedRows.value.some(r => r.ioa === ioa)) {
@@ -265,6 +320,9 @@ async function deletePoint() {
     await showAlert(String(e))
   }
 }
+
+// Allow parent to directly trigger data load (bypasses async watch timing issues)
+defineExpose({ loadData: loadDataPoints })
 </script>
 
 <template>
@@ -281,13 +339,13 @@ async function deletePoint() {
       />
       <button
         class="add-btn"
-        :disabled="!selectedServerId || selectedCA === null"
+        :disabled="!selectedServerId || currentCA === null"
         @click="showAddModal = true"
         title="添加数据点"
       >+</button>
       <button
         class="add-btn batch"
-        :disabled="!selectedServerId || selectedCA === null"
+        :disabled="!selectedServerId || currentCA === null"
         @click="showBatchModal = true"
         title="批量添加"
       >批量</button>
@@ -295,7 +353,7 @@ async function deletePoint() {
     </div>
 
     <div v-if="isLoading" class="table-loading">加载中...</div>
-    <div v-else-if="!selectedServerId || selectedCA === null" class="table-empty">
+    <div v-else-if="!selectedServerId || currentCA === null" class="table-empty">
       请在左侧树形导航中选择一个站
     </div>
     <div v-else-if="filteredPoints.length === 0" class="table-empty">
@@ -307,8 +365,10 @@ async function deletePoint() {
       ref="scrollContainer"
       class="table-scroll-container"
       tabindex="0"
+      @scroll="onScroll"
       @keydown="handleTableKeydown"
     >
+      <!-- Fixed header -->
       <table class="table">
         <thead>
           <tr>
@@ -320,41 +380,49 @@ async function deletePoint() {
             <th class="th-timestamp">时间戳</th>
           </tr>
         </thead>
-        <tbody>
-          <tr
-            v-for="point in filteredPoints"
-            :key="point.ioa"
-            :class="{ selected: isSelected(point) }"
-            @click="selectRow($event, point)"
-            @contextmenu.prevent="showContextMenu($event, point)"
-          >
-            <td class="col-ioa">{{ point.ioa }}</td>
-            <td class="col-type">{{ point.asdu_type }}</td>
-            <td class="col-name">{{ point.name || '-' }}</td>
-            <td class="col-value" @dblclick.stop="startEdit(point)">
-              <template v-if="editingCell?.ioa === point.ioa">
-                <input
-                  v-model="editValue"
-                  class="edit-input"
-                  type="text"
-                  autofocus
-                  @blur="commitEdit"
-                  @keydown="handleEditKeydown"
-                  @click.stop
-                />
-              </template>
-              <template v-else>
-                <span class="value-text">{{ point.value }}</span>
-              </template>
-            </td>
-            <td class="col-quality">
-              <span v-if="point.quality_iv" class="quality-dot invalid" title="Invalid">IV</span>
-              <span v-else class="quality-dot ok" title="Good"></span>
-            </td>
-            <td class="col-timestamp">{{ formatTimestamp(point.timestamp) }}</td>
-          </tr>
-        </tbody>
       </table>
+      <!-- Virtual scroll body -->
+      <div v-if="filteredPoints.length > 0" :style="{ height: totalHeight + 'px', position: 'relative' }">
+        <table class="table table-body" :style="{ transform: `translateY(${offsetY}px)` }">
+          <tbody>
+            <tr
+              v-for="point in visibleRows"
+              :key="point.ioa"
+              :class="{
+                selected: isSelected(point),
+                'value-changed': changedIoas.has(point.ioa)
+              }"
+              @click="selectRow($event, point)"
+              @contextmenu.prevent="showContextMenu($event, point)"
+            >
+              <td class="col-ioa">{{ point.ioa }}</td>
+              <td class="col-type">{{ point.asdu_type }}</td>
+              <td class="col-name">{{ point.name || '-' }}</td>
+              <td :class="['col-value', { 'value-highlight': changedIoas.has(point.ioa) }]" @dblclick.stop="startEdit(point)">
+                <template v-if="editingCell?.ioa === point.ioa">
+                  <input
+                    v-model="editValue"
+                    class="edit-input"
+                    type="text"
+                    autofocus
+                    @blur="commitEdit"
+                    @keydown="handleEditKeydown"
+                    @click.stop
+                  />
+                </template>
+                <template v-else>
+                  <span class="value-text">{{ point.value }}</span>
+                </template>
+              </td>
+              <td class="col-quality">
+                <span v-if="point.quality_iv" class="quality-dot invalid" title="Invalid">IV</span>
+                <span v-else class="quality-dot ok" title="Good"></span>
+              </td>
+              <td class="col-timestamp">{{ formatTimestamp(point.timestamp) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <!-- Context Menu -->
@@ -371,7 +439,7 @@ async function deletePoint() {
     <DataPointModal
       :visible="showAddModal"
       :server-id="selectedServerId ?? ''"
-      :common-address="selectedCA ?? 0"
+      :common-address="currentCA ?? 0"
       @close="showAddModal = false"
       @added="onPointAdded"
     />
@@ -380,7 +448,7 @@ async function deletePoint() {
     <BatchAddModal
       :visible="showBatchModal"
       :server-id="selectedServerId ?? ''"
-      :common-address="selectedCA ?? 0"
+      :common-address="currentCA ?? 0"
       @close="showBatchModal = false"
       @added="onPointAdded"
     />
@@ -518,6 +586,10 @@ async function deletePoint() {
   color: #1e1e2e;
 }
 
+.table tbody tr.value-changed {
+  background: rgba(250, 179, 135, 0.15);
+}
+
 .col-ioa {
   font-family: 'SF Mono', 'Fira Code', monospace;
   width: 70px;
@@ -541,10 +613,17 @@ async function deletePoint() {
 
 .col-value {
   width: 120px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  transition: color 0.3s;
 }
 
 .value-text {
   font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.col-value.value-highlight {
+  color: #fab387;
+  font-weight: 700;
 }
 
 .col-quality {

@@ -29,6 +29,7 @@ pub fn run() {
             commands::export_logs_csv,
             // Simulation commands
             commands::random_mutate_data_points,
+            commands::set_cyclic_config,
             // State persistence commands
             commands::export_app_state,
             commands::import_app_state,

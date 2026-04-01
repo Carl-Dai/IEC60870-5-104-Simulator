@@ -4,45 +4,56 @@ use crate::log_entry::{Direction, FrameLabel, LogEntry};
 use crate::types::{AsduTypeId, DataCategory};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener as AsyncTcpListener, TcpStream as AsyncTcpStream};
 use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
-// TLS Configuration (Slave / Server-side)
+// TLS Configuration
 // ---------------------------------------------------------------------------
 
-/// TLS configuration for a slave server.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlaveTlsConfig {
-    /// Enable TLS
     pub enabled: bool,
-    /// Path to server certificate file (PEM format)
     #[serde(default)]
     pub cert_file: String,
-    /// Path to server private key file (PEM format)
     #[serde(default)]
     pub key_file: String,
-    /// Path to CA certificate file (PEM) for client certificate verification (mTLS)
     #[serde(default)]
     pub ca_file: String,
-    /// Require client certificate (mutual TLS)
     #[serde(default)]
     pub require_client_cert: bool,
 }
 
 // ---------------------------------------------------------------------------
-// Stream Abstraction
+// Cyclic / Spontaneous Configuration
 // ---------------------------------------------------------------------------
 
-/// A stream that can be either plain TCP or TLS-wrapped (server-side).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CyclicConfig {
+    pub enabled: bool,
+    pub interval_ms: u32,
+}
+
+impl Default for CyclicConfig {
+    fn default() -> Self {
+        Self { enabled: false, interval_ms: 2000 }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream Abstraction (for blocking TLS path)
+// ---------------------------------------------------------------------------
+
 enum SlaveStream {
     Plain(TcpStream),
     Tls(native_tls::TlsStream<TcpStream>),
 }
 
-impl Read for SlaveStream {
+impl std::io::Read for SlaveStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             SlaveStream::Plain(s) => s.read(buf),
@@ -51,14 +62,13 @@ impl Read for SlaveStream {
     }
 }
 
-impl Write for SlaveStream {
+impl std::io::Write for SlaveStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             SlaveStream::Plain(s) => s.write(buf),
             SlaveStream::Tls(s) => s.write(buf),
         }
     }
-
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             SlaveStream::Plain(s) => s.flush(),
@@ -67,33 +77,18 @@ impl Write for SlaveStream {
     }
 }
 
-impl SlaveStream {
-    fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
-        match self {
-            SlaveStream::Plain(s) => s.set_nonblocking(nonblocking),
-            SlaveStream::Tls(s) => s.get_ref().set_nonblocking(nonblocking),
-        }
-    }
+// ---------------------------------------------------------------------------
+// Station
+// ---------------------------------------------------------------------------
 
-    fn set_read_timeout(&self, dur: Option<std::time::Duration>) -> std::io::Result<()> {
-        match self {
-            SlaveStream::Plain(s) => s.set_read_timeout(dur),
-            SlaveStream::Tls(s) => s.get_ref().set_read_timeout(dur),
-        }
-    }
-}
-
-/// A station within the slave server (analogous to SlaveDevice).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Station {
-    /// Common Address (1..65534)
     pub common_address: u16,
-    /// User-defined name
     pub name: String,
-    /// Data points (keyed by IOA)
     pub data_points: DataPointMap,
-    /// Information object definitions (metadata for UI)
     pub object_defs: Vec<InformationObjectDef>,
+    #[serde(default)]
+    pub cyclic_config: CyclicConfig,
 }
 
 impl Station {
@@ -103,57 +98,39 @@ impl Station {
             name: name.into(),
             data_points: DataPointMap::new(),
             object_defs: Vec::new(),
+            cyclic_config: CyclicConfig::default(),
         }
     }
 
-    /// Create a station with default data points pre-filled.
-    pub fn with_default_points(
-        common_address: u16,
-        name: impl Into<String>,
-        count_per_category: u32,
-    ) -> Self {
+    pub fn with_default_points(common_address: u16, name: impl Into<String>, count_per_category: u32) -> Self {
         let mut station = Self::new(common_address, name);
         let mut ioa = 1u32;
-
-        // Add points for each monitor category
         let categories = [
             (AsduTypeId::MSpNa1, DataCategory::SinglePoint),
             (AsduTypeId::MDpNa1, DataCategory::DoublePoint),
+            (AsduTypeId::MStNa1, DataCategory::StepPosition),
+            (AsduTypeId::MBoNa1, DataCategory::Bitstring),
             (AsduTypeId::MMeNa1, DataCategory::NormalizedMeasured),
             (AsduTypeId::MMeNb1, DataCategory::ScaledMeasured),
             (AsduTypeId::MMeNc1, DataCategory::FloatMeasured),
             (AsduTypeId::MItNa1, DataCategory::IntegratedTotals),
         ];
-
         for (asdu_type, category) in &categories {
             for _ in 0..count_per_category {
-                let def = InformationObjectDef {
-                    ioa,
-                    asdu_type: *asdu_type,
-                    category: *category,
-                    name: String::new(),
-                    comment: String::new(),
-                };
+                let def = InformationObjectDef { ioa, asdu_type: *asdu_type, category: *category, name: String::new(), comment: String::new() };
                 let point = DataPoint::new(ioa, *asdu_type);
                 station.data_points.insert(point);
                 station.object_defs.push(def);
                 ioa += 1;
             }
         }
-
         station
     }
 
-    /// Create a station with random data point values.
-    pub fn with_random_points(
-        common_address: u16,
-        name: impl Into<String>,
-        count_per_category: u32,
-    ) -> Self {
+    pub fn with_random_points(common_address: u16, name: impl Into<String>, count_per_category: u32) -> Self {
         use rand::Rng;
         let mut station = Self::with_default_points(common_address, name, count_per_category);
         let mut rng = rand::thread_rng();
-
         for point in station.data_points.points.values_mut() {
             point.value = match point.asdu_type.category() {
                 DataCategory::SinglePoint => DataPointValue::SinglePoint { value: rng.gen() },
@@ -161,72 +138,85 @@ impl Station {
                 DataCategory::NormalizedMeasured => DataPointValue::Normalized { value: rng.gen_range(-1.0..1.0) },
                 DataCategory::ScaledMeasured => DataPointValue::Scaled { value: rng.gen_range(-1000..1000) },
                 DataCategory::FloatMeasured => DataPointValue::ShortFloat { value: rng.gen_range(-100.0..100.0) },
-                DataCategory::IntegratedTotals => DataPointValue::IntegratedTotal {
-                    value: rng.gen_range(0..10000),
-                    carry: false,
-                    sequence: 0,
-                },
+                DataCategory::IntegratedTotals => DataPointValue::IntegratedTotal { value: rng.gen_range(0..10000), carry: false, sequence: 0 },
                 _ => DataPointValue::default_for(point.asdu_type),
             };
         }
-
         station
     }
 
-    /// Add a data point definition and its runtime data.
     pub fn add_point(&mut self, def: InformationObjectDef) -> Result<(), SlaveError> {
-        if self.data_points.contains(def.ioa) {
-            return Err(SlaveError::DuplicateIoa(def.ioa));
+        if let Some(existing) = self.data_points.get(def.ioa) {
+            if existing.asdu_type != def.asdu_type {
+                return Ok(());
+            }
+            // Same type — update metadata only, preserve runtime value
+        } else {
+            self.data_points.insert(DataPoint::new(def.ioa, def.asdu_type));
         }
-        let point = DataPoint::new(def.ioa, def.asdu_type);
-        self.data_points.insert(point);
-        self.object_defs.push(def);
+        if let Some(existing_def) = self.object_defs.iter_mut().find(|d| d.ioa == def.ioa) {
+            *existing_def = def;
+        } else {
+            self.object_defs.push(def);
+        }
         Ok(())
     }
 
-    /// Remove a data point by IOA.
     pub fn remove_point(&mut self, ioa: u32) -> Result<(), SlaveError> {
-        if !self.data_points.contains(ioa) {
-            return Err(SlaveError::IoaNotFound(ioa));
-        }
+        if !self.data_points.contains(ioa) { return Err(SlaveError::IoaNotFound(ioa)); }
         self.data_points.remove(ioa);
         self.object_defs.retain(|d| d.ioa != ioa);
         Ok(())
     }
 }
 
-/// Running state of a slave server.
+// ---------------------------------------------------------------------------
+// Server State
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ServerState {
-    Stopped,
-    Running,
-}
+pub enum ServerState { Stopped, Running }
 
-/// Transport configuration for a slave server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SlaveTransportConfig {
     pub bind_address: String,
     pub port: u16,
-    /// TLS configuration (optional)
     #[serde(default)]
     pub tls: SlaveTlsConfig,
 }
 
 impl Default for SlaveTransportConfig {
     fn default() -> Self {
-        Self {
-            bind_address: "0.0.0.0".to_string(),
-            port: 2404,
-            tls: SlaveTlsConfig::default(),
-        }
+        Self { bind_address: "0.0.0.0".to_string(), port: 2404, tls: SlaveTlsConfig::default() }
     }
 }
 
-/// Shared stations accessible by all connections.
+// ---------------------------------------------------------------------------
+// Connection State — shared between read task and cyclic task
+// ---------------------------------------------------------------------------
+
+/// Per-connection write queue. The async write task drains this queue.
+struct ConnectionWrite {
+    /// Mutex-protected byte queue. Write task drains this.
+    queue: Arc<tokio::sync::Mutex<Vec<u8>>>,
+    /// Sequence numbers.
+    ssn: u8,
+    rsn: u8,
+    /// Last sent value string per IOA.
+    last_sent: HashMap<u32, String>,
+    /// Logger.
+    log_collector: Option<Arc<LogCollector>>,
+}
+
+type SharedConnections = Arc<RwLock<HashMap<SocketAddr, ConnectionWrite>>>;
+
+// ---------------------------------------------------------------------------
+// SlaveServer
+// ---------------------------------------------------------------------------
+
 pub type SharedStations = Arc<RwLock<HashMap<u16, Station>>>;
 
-/// The IEC 104 slave server (analogous to SlaveConnection).
 pub struct SlaveServer {
     pub transport: SlaveTransportConfig,
     pub stations: SharedStations,
@@ -234,6 +224,8 @@ pub struct SlaveServer {
     state: ServerState,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
     server_handle: Option<tokio::task::JoinHandle<()>>,
+    cyclic_handle: Option<tokio::task::JoinHandle<()>>,
+    connections: SharedConnections,
 }
 
 impl SlaveServer {
@@ -245,6 +237,8 @@ impl SlaveServer {
             state: ServerState::Stopped,
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             server_handle: None,
+            cyclic_handle: None,
+            connections: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -253,11 +247,8 @@ impl SlaveServer {
         self
     }
 
-    pub fn state(&self) -> ServerState {
-        self.state
-    }
+    pub fn state(&self) -> ServerState { self.state }
 
-    /// Add a station.
     pub async fn add_station(&self, station: Station) -> Result<(), SlaveError> {
         let mut stations = self.stations.write().await;
         if stations.contains_key(&station.common_address) {
@@ -267,50 +258,63 @@ impl SlaveServer {
         Ok(())
     }
 
-    /// Remove a station by common address.
     pub async fn remove_station(&self, ca: u16) -> Result<Station, SlaveError> {
         let mut stations = self.stations.write().await;
-        stations
-            .remove(&ca)
-            .ok_or(SlaveError::StationNotFound(ca))
+        stations.remove(&ca).ok_or(SlaveError::StationNotFound(ca))
     }
 
-    /// Start the IEC 104 TCP server.
-    ///
-    /// This implements a basic IEC 104 server that accepts TCP connections
-    /// on the configured port and handles STARTDT, general interrogation,
-    /// and control commands.
-    pub async fn start(&mut self) -> Result<(), SlaveError> {
-        if self.state == ServerState::Running {
-            return Err(SlaveError::AlreadyRunning);
+    pub async fn set_cyclic_config(&self, common_address: u16, config: CyclicConfig) -> Result<(), SlaveError> {
+        let mut stations = self.stations.write().await;
+        let station = stations.get_mut(&common_address).ok_or(SlaveError::StationNotFound(common_address))?;
+        station.cyclic_config = config;
+        Ok(())
+    }
+
+    /// Queue spontaneous I-frames (COT=3) for the given IOAs to all connected clients.
+    pub async fn queue_spontaneous(&self, common_address: u16, changed_ioas: &[u32]) {
+        if changed_ioas.is_empty() { return; }
+        let stations = self.stations.read().await;
+        let station = match stations.get(&common_address) {
+            Some(s) => s,
+            None => return,
+        };
+        let ca_bytes = station.common_address.to_le_bytes();
+        let mut conns = self.connections.write().await;
+        for (_addr, conn) in conns.iter_mut() {
+            let mut batch = Vec::new();
+            for &ioa in changed_ioas {
+                let point = match station.data_points.get(ioa) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let ioa_bytes = point.ioa.to_le_bytes();
+                batch.extend(encode_point_frame(&point.value, 3, &ca_bytes, &ioa_bytes[..3], &mut conn.ssn, &mut conn.rsn));
+                conn.last_sent.insert(ioa, point.value.display());
+            }
+            if !batch.is_empty() {
+                conn.queue.lock().await.extend(batch);
+            }
         }
+    }
 
-        let addr = format!("{}:{}", self.transport.bind_address, self.transport.port);
-        let listener = TcpListener::bind(&addr)
-            .map_err(|e| SlaveError::BindError(format!("Failed to bind {}: {}", addr, e)))?;
-        listener.set_nonblocking(true)
-            .map_err(|e| SlaveError::BindError(format!("Failed to set non-blocking: {}", e)))?;
+    pub async fn start(&mut self) -> Result<(), SlaveError> {
+        if self.state == ServerState::Running { return Err(SlaveError::AlreadyRunning); }
 
-        // Build TLS acceptor if TLS is enabled
+        let addr_str = format!("{}:{}", self.transport.bind_address, self.transport.port);
+        let listener = AsyncTcpListener::bind(&addr_str)
+            .await
+            .map_err(|e| SlaveError::BindError(format!("Failed to bind {}: {}", addr_str, e)))?;
+
         let tls_acceptor: Option<Arc<native_tls::TlsAcceptor>> = if self.transport.tls.enabled {
-            let tls_config = &self.transport.tls;
-            let cert_pem = std::fs::read(&tls_config.cert_file)
-                .map_err(|e| SlaveError::TlsError(format!("读取服务器证书失败 {}: {}", tls_config.cert_file, e)))?;
-            let key_pem = std::fs::read(&tls_config.key_file)
-                .map_err(|e| SlaveError::TlsError(format!("读取服务器密钥失败 {}: {}", tls_config.key_file, e)))?;
-
-            let identity = native_tls::Identity::from_pkcs8(&cert_pem, &key_pem)
-                .map_err(|e| SlaveError::TlsError(format!("加载服务器身份失败: {}", e)))?;
-
+            let cfg = &self.transport.tls;
+            let cert = std::fs::read(&cfg.cert_file).map_err(|e| SlaveError::TlsError(format!("读取证书 {}: {}", cfg.cert_file, e)))?;
+            let key = std::fs::read(&cfg.key_file).map_err(|e| SlaveError::TlsError(format!("读取密钥 {}: {}", cfg.key_file, e)))?;
+            let identity = native_tls::Identity::from_pkcs8(&cert, &key)
+                .map_err(|e| SlaveError::TlsError(format!("加载身份: {}", e)))?;
             let mut builder = native_tls::TlsAcceptor::builder(identity);
             builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
-
-            let acceptor = builder.build()
-                .map_err(|e| SlaveError::TlsError(format!("创建 TLS 接受器失败: {}", e)))?;
-            Some(Arc::new(acceptor))
-        } else {
-            None
-        };
+            Some(Arc::new(builder.build().map_err(|e| SlaveError::TlsError(format!("创建接受器: {}", e)))?))
+        } else { None };
 
         let shutdown_flag = self.shutdown_flag.clone();
         shutdown_flag.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -318,376 +322,936 @@ impl SlaveServer {
         let log_collector = self.log_collector.clone();
         let is_tls = self.transport.tls.enabled;
 
-        let handle = tokio::spawn(async move {
+        // Shared connections map.
+        self.connections = Arc::new(RwLock::new(HashMap::new()));
+        let connections = self.connections.clone();
+        let cyclic_connections = connections.clone();
+
+        // Start cyclic background task.
+        let cyclic_stations = self.stations.clone();
+        let cyclic_flag = self.shutdown_flag.clone();
+        let cyclic_log = self.log_collector.clone();
+        let cyclic_handle = tokio::spawn(async move {
+            // Use interval_ms from the first enabled station, default to 2000ms
+            let get_interval_ms = || async {
+                let stations = cyclic_stations.read().await;
+                stations.values()
+                    .find(|s| s.cyclic_config.enabled)
+                    .map(|s| s.cyclic_config.interval_ms)
+                    .unwrap_or(2000)
+            };
+            let mut interval_ms = get_interval_ms().await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms as u64));
             loop {
-                if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                    break;
+                interval.tick().await;
+                if cyclic_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
+
+                // Check if interval changed
+                let new_interval_ms = get_interval_ms().await;
+                if new_interval_ms != interval_ms {
+                    interval_ms = new_interval_ms;
+                    interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms as u64));
                 }
 
-                match listener.accept() {
-                    Ok((tcp_stream, peer_addr)) => {
-                        if let Some(ref lc) = log_collector {
+                let stations_read = cyclic_stations.read().await;
+                let addrs_to_remove: Vec<SocketAddr> = {
+                    let mut conns = cyclic_connections.write().await;
+                    let to_remove = Vec::new();
+                    for (_addr, conn) in conns.iter_mut() {
+                        for station in stations_read.values() {
+                            if !station.cyclic_config.enabled { continue; }
+                            for point in station.data_points.all_sorted() {
+                                let value_str = point.value.display();
+                                if let Some(last) = conn.last_sent.get(&point.ioa) {
+                                    if last == &value_str { continue; }
+                                }
+                                let ca_bytes = station.common_address.to_le_bytes();
+                                let ioa_bytes = point.ioa.to_le_bytes();
+                                let asdu = encode_point_frame(&point.value, 3, &ca_bytes, &ioa_bytes[..3], &mut conn.ssn, &mut conn.rsn);
+                                conn.queue.lock().await.extend(asdu);
+                                conn.last_sent.insert(point.ioa, value_str);
+                            }
+                        }
+                    }
+                    to_remove
+                };
+                drop(stations_read);
+                if !addrs_to_remove.is_empty() {
+                    let mut conns = cyclic_connections.write().await;
+                    for addr in addrs_to_remove {
+                        conns.remove(&addr);
+                        if let Some(ref lc) = cyclic_log {
                             lc.try_add(LogEntry::new(
-                                Direction::Rx,
-                                FrameLabel::ConnectionEvent,
-                                format!("客户端连接: {}{}", peer_addr, if is_tls { " (TLS)" } else { "" }),
+                                Direction::Tx, FrameLabel::ConnectionEvent,
+                                format!("连接关闭 (cyclic): {}", addr),
                             ));
                         }
+                    }
+                }
+            }
+        });
+        self.cyclic_handle = Some(cyclic_handle);
 
-                        // Wrap with TLS if configured
-                        let slave_stream = if let Some(ref acceptor) = tls_acceptor {
-                            // TLS handshake (blocking, done in spawn_blocking)
-                            let acceptor = acceptor.clone();
-                            let lc = log_collector.clone();
-                            match acceptor.accept(tcp_stream) {
-                                Ok(tls_stream) => {
-                                    if let Some(ref lc) = lc {
-                                        lc.try_add(LogEntry::new(
-                                            Direction::Rx,
-                                            FrameLabel::ConnectionEvent,
-                                            format!("TLS 握手成功: {}", peer_addr),
-                                        ));
-                                    }
-                                    SlaveStream::Tls(tls_stream)
-                                }
-                                Err(e) => {
-                                    if let Some(ref lc) = lc {
-                                        lc.try_add(LogEntry::new(
-                                            Direction::Rx,
-                                            FrameLabel::ConnectionEvent,
-                                            format!("TLS 握手失败: {} - {}", peer_addr, e),
-                                        ));
-                                    }
-                                    continue;
-                                }
-                            }
-                        } else {
-                            SlaveStream::Plain(tcp_stream)
-                        };
-
+        let handle = tokio::spawn(async move {
+            loop {
+                if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
+                match listener.accept().await {
+                    Ok((stream, peer_addr)) => {
+                        let peer_str = format!("{}", peer_addr);
+                        if let Some(ref lc) = log_collector {
+                            lc.try_add(LogEntry::new(
+                                Direction::Rx, FrameLabel::ConnectionEvent,
+                                format!("客户端连接: {}{}", peer_str, if is_tls { " (TLS)" } else { "" }),
+                            ));
+                        }
                         let stations = stations.clone();
                         let lc = log_collector.clone();
                         let flag = shutdown_flag.clone();
-                        tokio::task::spawn_blocking(move || {
-                            handle_client(slave_stream, stations, lc, flag);
-                        });
+                        let tls_acceptor = tls_acceptor.clone();
+                        let connections = connections.clone();
+
+                        if tls_acceptor.is_some() {
+                            // TLS: blocking I/O via spawn_blocking.
+                            tokio::task::spawn_blocking(move || {
+                                let tcp_stream = stream.into_std().expect("into_std");
+                                let acceptor = tls_acceptor.as_ref().unwrap();
+                                let mut tls_stream = match acceptor.accept(tcp_stream) {
+                                    Ok(s) => s,
+                                    Err(e) => {
+                                        if let Some(ref lc) = lc {
+                                            lc.try_add(LogEntry::new(
+                                                Direction::Rx, FrameLabel::ConnectionEvent,
+                                                format!("TLS 握手失败: {} - {}", peer_str, e),
+                                            ));
+                                        }
+                                        return;
+                                    }
+                                };
+                                if let Some(ref lc) = lc {
+                                    lc.try_add(LogEntry::new(
+                                        Direction::Rx, FrameLabel::ConnectionEvent,
+                                        format!("TLS 握手成功: {}", peer_str),
+                                    ));
+                                }
+                                handleClientBlocking(&mut tls_stream, stations, lc, flag);
+                            });
+                        } else {
+                            // Plain TCP: async with queue-based cyclic writes.
+                            // Split into read/write halves so we can use the write half in a
+                            // dedicated write task and pass read half to the read loop.
+                            let (rh, wh) = tokio::io::split(stream);
+
+                            let queue: SharedQueue = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+                            let queue_for_writer = Arc::clone(&queue);
+                            let queue_for_reader = Arc::clone(&queue);
+                            let lc_for_reader = lc.clone();
+                            let stations_for_reader = stations.clone();
+                            let addr_for_read = peer_addr;
+
+                            // Register connection for cyclic task.
+                            connections.write().await.insert(peer_addr, ConnectionWrite {
+                                queue,
+                                ssn: 0, rsn: 0,
+                                last_sent: HashMap::new(),
+                                log_collector: lc.clone(),
+                            });
+
+                            // Spawn async write drain task (owns WriteHalf).
+                            let flag_for_writer = flag.clone();
+                            let conn_for_writer = Arc::clone(&connections);
+                            tokio::spawn(async move {
+                                let mut wh = wh;
+                                loop {
+                                    if flag_for_writer.load(std::sync::atomic::Ordering::SeqCst) { break; }
+                                    let bytes = queue_for_writer.lock().await;
+                                    if !bytes.is_empty() {
+                                        // Drain all pending bytes.
+                                        let mut drain_idx = 0;
+                                        while drain_idx < bytes.len() {
+                                            match wh.write_all(&bytes[drain_idx..]).await {
+                                                Ok(()) => {
+                                                    drain_idx = bytes.len();
+                                                }
+                                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                                }
+                                                Err(_) => {
+                                                    conn_for_writer.write().await.remove(&addr_for_read);
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        drop(bytes);
+                                        queue_for_writer.lock().await.clear();
+                                    } else {
+                                        drop(bytes);
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                }
+                            });
+
+                            // Spawn read task (owns ReadHalf + queue for enqueueing responses).
+                            tokio::spawn(async move {
+                                handleClientReadLoop(rh, stations_for_reader, lc_for_reader, flag, connections, queue_for_reader, addr_for_read).await;
+                            });
+                        }
                     }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                    }
-                    Err(_) => {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    }
+                    Err(_) => { tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
                 }
             }
         });
 
         self.server_handle = Some(handle);
         self.state = ServerState::Running;
-
         if let Some(ref lc) = self.log_collector {
             lc.try_add(LogEntry::new(
-                Direction::Tx,
-                FrameLabel::ConnectionEvent,
-                format!("服务器启动: {}{}", addr, if is_tls { " (TLS)" } else { "" }),
+                Direction::Tx, FrameLabel::ConnectionEvent,
+                format!("服务器启动: {}{}", addr_str, if is_tls { " (TLS)" } else { "" }),
             ));
         }
-
         Ok(())
     }
 
-    /// Stop the server.
     pub async fn stop(&mut self) -> Result<(), SlaveError> {
-        if self.state == ServerState::Stopped {
-            return Err(SlaveError::NotRunning);
-        }
-
+        if self.state == ServerState::Stopped { return Err(SlaveError::NotRunning); }
         self.shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-
-        if let Some(handle) = self.server_handle.take() {
-            let _ = handle.await;
-        }
-
+        if let Some(h) = self.server_handle.take() { let _ = h.await; }
+        if let Some(h) = self.cyclic_handle.take() { let _ = h.await; }
         self.state = ServerState::Stopped;
-
         if let Some(ref lc) = self.log_collector {
             lc.try_add(LogEntry::new(
-                Direction::Tx,
-                FrameLabel::ConnectionEvent,
+                Direction::Tx, FrameLabel::ConnectionEvent,
                 "服务器停止".to_string(),
             ));
         }
-
         Ok(())
     }
 }
 
-/// Handle a single client connection using the IEC 104 protocol.
-fn handle_client(
-    mut stream: SlaveStream,
+// ---------------------------------------------------------------------------
+// Shared Queue type alias
+// ---------------------------------------------------------------------------
+type SharedQueue = Arc<tokio::sync::Mutex<Vec<u8>>>;
+
+// ---------------------------------------------------------------------------
+// Async Client Read Loop
+// ---------------------------------------------------------------------------
+
+async fn handleClientReadLoop(
+    mut stream: tokio::io::ReadHalf<AsyncTcpStream>,
     stations: SharedStations,
     log_collector: Option<Arc<LogCollector>>,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+    connections: SharedConnections,
+    queue: SharedQueue,
+    peer_addr: SocketAddr,
 ) {
-    stream.set_nonblocking(false).ok();
-    stream.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok();
-
     let mut buf = [0u8; 512];
+    let mut ssn: u8 = 0;
+    let mut rsn: u8 = 0;
 
     loop {
-        if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
-            break;
-        }
-
-        let n = match stream.read(&mut buf) {
-            Ok(0) => break, // Connection closed
+        if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let n = match stream.read(&mut buf).await {
+            Ok(0) => break,
             Ok(n) => n,
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut
-                || e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(_) => break,
         };
 
         let data = &buf[..n];
 
-        // Log raw received frame
         if let Some(ref lc) = log_collector {
             if let Ok(frame) = crate::frame::parse_apci(data) {
                 let summary = crate::frame::format_frame_summary(&frame);
                 lc.try_add(LogEntry::with_raw_bytes(
-                    Direction::Rx,
-                    FrameLabel::IFrame(summary.clone()),
-                    summary,
-                    data.to_vec(),
+                    Direction::Rx, FrameLabel::IFrame(summary.clone()),
+                    summary, data.to_vec(),
                 ));
             }
         }
 
-        // Parse and respond to IEC 104 frames
         if data.len() >= 6 && data[0] == 0x68 {
             let ctrl1 = data[2];
 
             if ctrl1 & 0x03 == 0x03 {
-                // U-frame
                 match ctrl1 {
                     0x07 => {
-                        // STARTDT ACT -> respond with STARTDT CON
-                        let response = [0x68, 0x04, 0x0B, 0x00, 0x00, 0x00];
-                        let _ = stream.write_all(&response);
+                        let resp = [0x68, 0x04, 0x0B, 0x00, 0x00, 0x00];
+                        queue.lock().await.extend_from_slice(&resp);
                         if let Some(ref lc) = log_collector {
-                            lc.try_add(LogEntry::with_raw_bytes(
-                                Direction::Tx,
-                                FrameLabel::UStartCon,
-                                "STARTDT CON",
-                                response.to_vec(),
-                            ));
+                            lc.try_add(LogEntry::with_raw_bytes(Direction::Tx, FrameLabel::UStartCon, "STARTDT CON", resp.to_vec()));
                         }
                     }
                     0x13 => {
-                        // STOPDT ACT -> respond with STOPDT CON
-                        let response = [0x68, 0x04, 0x23, 0x00, 0x00, 0x00];
-                        let _ = stream.write_all(&response);
+                        let resp = [0x68, 0x04, 0x23, 0x00, 0x00, 0x00];
+                        queue.lock().await.extend_from_slice(&resp);
                         if let Some(ref lc) = log_collector {
-                            lc.try_add(LogEntry::with_raw_bytes(
-                                Direction::Tx,
-                                FrameLabel::UStopCon,
-                                "STOPDT CON",
-                                response.to_vec(),
-                            ));
+                            lc.try_add(LogEntry::with_raw_bytes(Direction::Tx, FrameLabel::UStopCon, "STOPDT CON", resp.to_vec()));
                         }
                     }
                     0x43 => {
-                        // TESTFR ACT -> respond with TESTFR CON
-                        let response = [0x68, 0x04, 0x83, 0x00, 0x00, 0x00];
-                        let _ = stream.write_all(&response);
+                        let resp = [0x68, 0x04, 0x83, 0x00, 0x00, 0x00];
+                        queue.lock().await.extend_from_slice(&resp);
                         if let Some(ref lc) = log_collector {
-                            lc.try_add(LogEntry::with_raw_bytes(
-                                Direction::Tx,
-                                FrameLabel::UTestCon,
-                                "TESTFR CON",
-                                response.to_vec(),
-                            ));
+                            lc.try_add(LogEntry::with_raw_bytes(Direction::Tx, FrameLabel::UTestCon, "TESTFR CON", resp.to_vec()));
                         }
                     }
                     _ => {}
                 }
             } else if ctrl1 & 0x01 == 0 && data.len() >= 12 {
-                // I-frame with ASDU
                 let asdu_type = data[6];
-                let _num_objects = data[7];
                 let cause = data[8];
                 let ca = u16::from_le_bytes([data[10], data[11]]);
 
                 match asdu_type {
                     100 => {
-                        // General Interrogation Command (C_IC_NA_1)
-                        // Send activation confirmation
-                        let mut ack = data[..n].to_vec();
-                        ack[8] = 7; // COT = ActivationCon
-                        // Update sequence numbers
-                        let _ = stream.write_all(&ack);
-
-                        if let Some(ref lc) = log_collector {
-                            lc.try_add(LogEntry::new(
-                                Direction::Tx,
-                                FrameLabel::GeneralInterrogation,
-                                format!("GI 激活确认 CA={}", ca),
-                            ));
-                        }
-
-                        // Send data points for the requested CA
-                        // Clone station data first (to release the async lock), then write directly.
-                        let station_clone = {
-                            let rt = tokio::runtime::Handle::try_current();
-                            if let Ok(handle) = rt {
-                                let stations = stations.clone();
-                                handle.block_on(async {
-                                    let stations_read = stations.read().await;
-                                    stations_read.get(&ca).cloned()
-                                })
-                            } else {
-                                None
+                        let mut ack = data[..n].to_vec(); ack[8] = 7;
+                        queue.lock().await.extend_from_slice(&ack);
+                        let stations_read = stations.read().await;
+                        if let Some(station) = stations_read.get(&ca) {
+                            if let Some(ref lc) = log_collector {
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::GeneralInterrogation,
+                                    format!("GI 激活确认 CA={}", ca),
+                                ));
                             }
-                        };
-                        if let Some(ref station) = station_clone {
-                            send_interrogation_response(&mut stream, station, &log_collector);
+                            // Queue GI response frames.
+                            let ca_bytes = station.common_address.to_le_bytes();
+                            for point in station.data_points.all_sorted() {
+                                let ioa_bytes = point.ioa.to_le_bytes();
+                                let asdu = encode_point_frame(&point.value, 20, &ca_bytes, &ioa_bytes[..3], &mut ssn, &mut rsn);
+                                queue.lock().await.extend_from_slice(&asdu);
+                            }
                         }
-
-                        // Send activation termination
-                        let mut term = data[..n].to_vec();
-                        term[8] = 10; // COT = ActivationTermination
-                        let _ = stream.write_all(&term);
-
+                        drop(stations_read);
+                        let mut term = data[..n].to_vec(); term[8] = 10;
+                        queue.lock().await.extend_from_slice(&term);
                         if let Some(ref lc) = log_collector {
                             lc.try_add(LogEntry::new(
-                                Direction::Tx,
-                                FrameLabel::GeneralInterrogation,
+                                Direction::Tx, FrameLabel::GeneralInterrogation,
                                 format!("GI 激活终止 CA={}", ca),
                             ));
                         }
                     }
-                    103 => {
-                        // Clock Synchronization (C_CS_NA_1)
-                        let mut ack = data[..n].to_vec();
-                        ack[8] = 7; // COT = ActivationCon
-                        let _ = stream.write_all(&ack);
-
+                    101 => {
+                        // Counter Interrogation (C_CI_NA_1, Type 101)
+                        let mut ack = data[..n].to_vec(); ack[8] = 7;
+                        queue.lock().await.extend_from_slice(&ack);
+                        let stations_read = stations.read().await;
+                        if let Some(station) = stations_read.get(&ca) {
+                            if let Some(ref lc) = log_collector {
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::CounterInterrogation,
+                                    format!("累计量召唤 激活确认 CA={}", ca),
+                                ));
+                            }
+                            let ca_bytes = station.common_address.to_le_bytes();
+                            for point in station.data_points.all_sorted() {
+                                let ioa_bytes = point.ioa.to_le_bytes();
+                                let asdu = match &point.value {
+                                    DataPointValue::IntegratedTotal { value, carry, sequence } => {
+                                        let b = value.to_le_bytes();
+                                        let mut bcr = *sequence & 0x1F;
+                                        if *carry { bcr |= 0x20; }
+                                        build_i_frame(15, 37, &ca_bytes, &ioa_bytes[..3], &[b[0], b[1], b[2], b[3], bcr], &mut ssn, &mut rsn)
+                                    }
+                                    _ => continue,
+                                };
+                                queue.lock().await.extend_from_slice(&asdu);
+                            }
+                        }
+                        drop(stations_read);
+                        let mut term = data[..n].to_vec(); term[8] = 10;
+                        queue.lock().await.extend_from_slice(&term);
                         if let Some(ref lc) = log_collector {
                             lc.try_add(LogEntry::new(
-                                Direction::Tx,
-                                FrameLabel::ClockSync,
+                                Direction::Tx, FrameLabel::CounterInterrogation,
+                                format!("累计量召唤 激活终止 CA={}", ca),
+                            ));
+                        }
+                    }
+                    103 => {
+                        let mut ack = data[..n].to_vec(); ack[8] = 7;
+                        queue.lock().await.extend_from_slice(&ack);
+                        if let Some(ref lc) = log_collector {
+                            lc.try_add(LogEntry::new(
+                                Direction::Tx, FrameLabel::ClockSync,
                                 format!("时钟同步确认 CA={}", ca),
                             ));
                         }
                     }
                     45 => {
-                        // Single Command (C_SC_NA_1)
-                        if data.len() >= 15 {
+                        if data.len() >= 16 {
                             let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
-                            let sco = data[15];
-                            let value = sco & 0x01 != 0;
-
-                            // Update data point
-                            let rt = tokio::runtime::Handle::try_current();
-                            if let Ok(handle) = rt {
-                                let stations = stations.clone();
-                                let _ = handle.block_on(async {
-                                    let mut stations_w = stations.write().await;
-                                    if let Some(station) = stations_w.get_mut(&ca) {
-                                        if let Some(dp) = station.data_points.get_mut(ioa) {
-                                            dp.value = DataPointValue::SinglePoint { value };
-                                            dp.timestamp = Some(chrono::Utc::now());
-                                        }
+                            let sco = data[15]; let value = sco & 0x01 != 0; let is_select = sco & 0x80 != 0;
+                            if !is_select {
+                                let mut s = stations.write().await;
+                                if let Some(st) = s.get_mut(&ca) {
+                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                        dp.value = DataPointValue::SinglePoint { value };
+                                        dp.timestamp = Some(chrono::Utc::now());
                                     }
-                                });
+                                }
                             }
-
-                            // Send activation confirmation
-                            let mut ack = data[..n].to_vec();
-                            ack[8] = 7; // COT = ActivationCon
-                            let _ = stream.write_all(&ack);
-
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            queue.lock().await.extend_from_slice(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                queue.lock().await.extend_from_slice(&term);
+                            }
                             if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
                                 lc.try_add(LogEntry::new(
-                                    Direction::Tx,
-                                    FrameLabel::SingleCommand,
-                                    format!("单点命令确认 IOA={} val={} CA={}", ioa, value, ca),
+                                    Direction::Tx, FrameLabel::SingleCommand,
+                                    format!("单点命令确认 IOA={} val={} {} CA={}", ioa, value, mode, ca),
                                 ));
                             }
                         }
                     }
                     46 => {
-                        // Double Command (C_DC_NA_1)
-                        if data.len() >= 15 {
+                        if data.len() >= 16 {
                             let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
-                            let dco = data[15];
-                            let value = dco & 0x03;
-
-                            let rt = tokio::runtime::Handle::try_current();
-                            if let Ok(handle) = rt {
-                                let stations = stations.clone();
-                                let _ = handle.block_on(async {
-                                    let mut stations_w = stations.write().await;
-                                    if let Some(station) = stations_w.get_mut(&ca) {
-                                        if let Some(dp) = station.data_points.get_mut(ioa) {
-                                            dp.value = DataPointValue::DoublePoint { value };
+                            let dco = data[15]; let value = dco & 0x03; let is_select = dco & 0x80 != 0;
+                            if !is_select {
+                                let mut s = stations.write().await;
+                                if let Some(st) = s.get_mut(&ca) {
+                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                        dp.value = DataPointValue::DoublePoint { value };
+                                        dp.timestamp = Some(chrono::Utc::now());
+                                    }
+                                }
+                            }
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            queue.lock().await.extend_from_slice(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                queue.lock().await.extend_from_slice(&term);
+                            }
+                            if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::DoubleCommand,
+                                    format!("双点命令确认 IOA={} val={} {} CA={}", ioa, value, mode, ca),
+                                ));
+                            }
+                        }
+                    }
+                    47 => {
+                        if data.len() >= 16 {
+                            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+                            let rco = data[15]; let step_val = rco & 0x03; let is_select = rco & 0x80 != 0;
+                            if !is_select {
+                                let mut s = stations.write().await;
+                                if let Some(st) = s.get_mut(&ca) {
+                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                        if let DataPointValue::StepPosition { ref mut value, .. } = dp.value {
+                                            match step_val { 1 => { if *value > -64 { *value -= 1; } } 2 => { if *value < 63 { *value += 1; } } _ => {} }
                                             dp.timestamp = Some(chrono::Utc::now());
                                         }
                                     }
-                                });
+                                }
                             }
-
-                            let mut ack = data[..n].to_vec();
-                            ack[8] = 7;
-                            let _ = stream.write_all(&ack);
-
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            queue.lock().await.extend_from_slice(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                queue.lock().await.extend_from_slice(&term);
+                            }
                             if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                let dir = match step_val { 1 => "降", 2 => "升", _ => "?" };
                                 lc.try_add(LogEntry::new(
-                                    Direction::Tx,
-                                    FrameLabel::DoubleCommand,
-                                    format!("双点命令确认 IOA={} val={} CA={}", ioa, value, ca),
+                                    Direction::Tx, FrameLabel::StepCommand,
+                                    format!("步调节命令确认 IOA={} {} {} CA={}", ioa, dir, mode, ca),
+                                ));
+                            }
+                        }
+                    }
+                    48 => {
+                        if data.len() >= 18 {
+                            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+                            let nva = i16::from_le_bytes([data[15], data[16]]);
+                            let qos = data[17]; let is_select = qos & 0x80 != 0;
+                            let value = nva as f32 / 32767.0;
+                            if !is_select {
+                                let mut s = stations.write().await;
+                                if let Some(st) = s.get_mut(&ca) {
+                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                        dp.value = DataPointValue::Normalized { value };
+                                        dp.timestamp = Some(chrono::Utc::now());
+                                    }
+                                }
+                            }
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            queue.lock().await.extend_from_slice(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                queue.lock().await.extend_from_slice(&term);
+                            }
+                            if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::SetpointNormalized,
+                                    format!("归一化设定值确认 IOA={} val={:.4} {} CA={}", ioa, value, mode, ca),
+                                ));
+                            }
+                        }
+                    }
+                    49 => {
+                        if data.len() >= 18 {
+                            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+                            let sva = i16::from_le_bytes([data[15], data[16]]);
+                            let qos = data[17]; let is_select = qos & 0x80 != 0;
+                            if !is_select {
+                                let mut s = stations.write().await;
+                                if let Some(st) = s.get_mut(&ca) {
+                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                        dp.value = DataPointValue::Scaled { value: sva };
+                                        dp.timestamp = Some(chrono::Utc::now());
+                                    }
+                                }
+                            }
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            queue.lock().await.extend_from_slice(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                queue.lock().await.extend_from_slice(&term);
+                            }
+                            if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::SetpointScaled,
+                                    format!("标度化设定值确认 IOA={} val={} {} CA={}", ioa, sva, mode, ca),
                                 ));
                             }
                         }
                     }
                     50 => {
-                        // Set-point, short float (C_SE_NC_1)
-                        if data.len() >= 19 {
+                        if data.len() >= 20 {
                             let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
                             let value = f32::from_le_bytes([data[15], data[16], data[17], data[18]]);
-
-                            let rt = tokio::runtime::Handle::try_current();
-                            if let Ok(handle) = rt {
-                                let stations = stations.clone();
-                                let _ = handle.block_on(async {
-                                    let mut stations_w = stations.write().await;
-                                    if let Some(station) = stations_w.get_mut(&ca) {
-                                        if let Some(dp) = station.data_points.get_mut(ioa) {
-                                            dp.value = DataPointValue::ShortFloat { value };
-                                            dp.timestamp = Some(chrono::Utc::now());
-                                        }
+                            let qos = data[19]; let is_select = qos & 0x80 != 0;
+                            if !is_select {
+                                let mut s = stations.write().await;
+                                if let Some(st) = s.get_mut(&ca) {
+                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                        dp.value = DataPointValue::ShortFloat { value };
+                                        dp.timestamp = Some(chrono::Utc::now());
                                     }
-                                });
+                                }
                             }
-
-                            let mut ack = data[..n].to_vec();
-                            ack[8] = 7;
-                            let _ = stream.write_all(&ack);
-
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            queue.lock().await.extend_from_slice(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                queue.lock().await.extend_from_slice(&term);
+                            }
                             if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
                                 lc.try_add(LogEntry::new(
-                                    Direction::Tx,
-                                    FrameLabel::SetpointFloat,
-                                    format!("浮点设定值确认 IOA={} val={:.3} CA={}", ioa, value, ca),
+                                    Direction::Tx, FrameLabel::SetpointFloat,
+                                    format!("浮点设定值确认 IOA={} val={:.3} {} CA={}", ioa, value, mode, ca),
                                 ));
                             }
                         }
                     }
                     _ => {
-                        // Unknown ASDU type - log but ignore
                         if let Some(ref lc) = log_collector {
                             lc.try_add(LogEntry::new(
-                                Direction::Rx,
-                                FrameLabel::IFrame(format!("Type{}", asdu_type)),
+                                Direction::Rx, FrameLabel::IFrame(format!("Type{}", asdu_type)),
+                                format!("未知 ASDU 类型={} CA={} COT={}", asdu_type, ca, cause),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    connections.write().await.remove(&peer_addr);
+    if let Some(ref lc) = log_collector {
+        lc.try_add(LogEntry::new(
+            Direction::Tx, FrameLabel::ConnectionEvent,
+            format!("连接关闭: {}", peer_addr),
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blocking Client Handler (for TLS)
+// ---------------------------------------------------------------------------
+
+fn handleClientBlocking(
+    stream: &mut native_tls::TlsStream<TcpStream>,
+    stations: SharedStations,
+    log_collector: Option<Arc<LogCollector>>,
+    shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::io::{Read, Write};
+    let mut buf = [0u8; 512];
+
+    loop {
+        if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
+        let n = match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            Err(_) => break,
+        };
+
+        let data = &buf[..n];
+
+        if let Some(ref lc) = log_collector {
+            if let Ok(frame) = crate::frame::parse_apci(data) {
+                let summary = crate::frame::format_frame_summary(&frame);
+                lc.try_add(LogEntry::with_raw_bytes(
+                    Direction::Rx, FrameLabel::IFrame(summary.clone()),
+                    summary, data.to_vec(),
+                ));
+            }
+        }
+
+        if data.len() >= 6 && data[0] == 0x68 {
+            let ctrl1 = data[2];
+
+            if ctrl1 & 0x03 == 0x03 {
+                match ctrl1 {
+                    0x07 => {
+                        let resp = [0x68, 0x04, 0x0B, 0x00, 0x00, 0x00];
+                        let _ = stream.write_all(&resp);
+                        if let Some(ref lc) = log_collector {
+                            lc.try_add(LogEntry::with_raw_bytes(Direction::Tx, FrameLabel::UStartCon, "STARTDT CON", resp.to_vec()));
+                        }
+                    }
+                    0x13 => {
+                        let resp = [0x68, 0x04, 0x23, 0x00, 0x00, 0x00];
+                        let _ = stream.write_all(&resp);
+                        if let Some(ref lc) = log_collector {
+                            lc.try_add(LogEntry::with_raw_bytes(Direction::Tx, FrameLabel::UStopCon, "STOPDT CON", resp.to_vec()));
+                        }
+                    }
+                    0x43 => {
+                        let resp = [0x68, 0x04, 0x83, 0x00, 0x00, 0x00];
+                        let _ = stream.write_all(&resp);
+                        if let Some(ref lc) = log_collector {
+                            lc.try_add(LogEntry::with_raw_bytes(Direction::Tx, FrameLabel::UTestCon, "TESTFR CON", resp.to_vec()));
+                        }
+                    }
+                    _ => {}
+                }
+            } else if ctrl1 & 0x01 == 0 && data.len() >= 12 {
+                let asdu_type = data[6];
+                let cause = data[8];
+                let ca = u16::from_le_bytes([data[10], data[11]]);
+
+                match asdu_type {
+                    100 => {
+                        let mut ack = data[..n].to_vec(); ack[8] = 7;
+                        let _ = stream.write_all(&ack);
+                        let rt = tokio::runtime::Handle::try_current();
+                        if let Ok(handle) = rt {
+                            let stations = stations.clone();
+                            let lc = log_collector.clone();
+                            handle.block_on(async {
+                                let stations_read = stations.read().await;
+                                if let Some(station) = stations_read.get(&ca) {
+                                    if let Some(ref lc) = lc {
+                                        lc.try_add(LogEntry::new(
+                                            Direction::Tx, FrameLabel::GeneralInterrogation,
+                                            format!("GI 激活确认 CA={}", ca),
+                                        ));
+                                    }
+                                    sendGiResponseBlocking(stream, station);
+                                }
+                                drop(stations_read);
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                let _ = stream.write_all(&term);
+                                if let Some(ref lc) = lc {
+                                    lc.try_add(LogEntry::new(
+                                        Direction::Tx, FrameLabel::GeneralInterrogation,
+                                        format!("GI 激活终止 CA={}", ca),
+                                    ));
+                                }
+                            });
+                        }
+                    }
+                    101 => {
+                        // Counter Interrogation (C_CI_NA_1, Type 101)
+                        let mut ack = data[..n].to_vec(); ack[8] = 7;
+                        let _ = stream.write_all(&ack);
+                        let rt = tokio::runtime::Handle::try_current();
+                        if let Ok(handle) = rt {
+                            let stations = stations.clone();
+                            let lc = log_collector.clone();
+                            handle.block_on(async {
+                                let stations_read = stations.read().await;
+                                if let Some(station) = stations_read.get(&ca) {
+                                    if let Some(ref lc) = lc {
+                                        lc.try_add(LogEntry::new(
+                                            Direction::Tx, FrameLabel::CounterInterrogation,
+                                            format!("累计量召唤 激活确认 CA={}", ca),
+                                        ));
+                                    }
+                                    // Counter interrogation: send only IntegratedTotals points
+                                    let ca_bytes = station.common_address.to_le_bytes();
+                                    let mut ssn: u8 = 0;
+                                    let mut rsn: u8 = 0;
+                                    for point in station.data_points.all_sorted() {
+                                        let ioa_bytes = point.ioa.to_le_bytes();
+                                        let asdu = match &point.value {
+                                            DataPointValue::IntegratedTotal { value, carry, sequence } => {
+                                                let b = value.to_le_bytes();
+                                                let mut bcr = *sequence & 0x1F;
+                                                if *carry { bcr |= 0x20; }
+                                                build_i_frame(15, 37, &ca_bytes, &ioa_bytes[..3], &[b[0], b[1], b[2], b[3], bcr], &mut ssn, &mut rsn)
+                                            }
+                                            _ => continue,
+                                        };
+                                        let _ = stream.write_all(&asdu);
+                                    }
+                                }
+                                drop(stations_read);
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                let _ = stream.write_all(&term);
+                                if let Some(ref lc) = lc {
+                                    lc.try_add(LogEntry::new(
+                                        Direction::Tx, FrameLabel::CounterInterrogation,
+                                        format!("累计量召唤 激活终止 CA={}", ca),
+                                    ));
+                                }
+                            });
+                        }
+                    }
+                    103 => {
+                        let mut ack = data[..n].to_vec(); ack[8] = 7;
+                        let _ = stream.write_all(&ack);
+                        if let Some(ref lc) = log_collector {
+                            lc.try_add(LogEntry::new(
+                                Direction::Tx, FrameLabel::ClockSync,
+                                format!("时钟同步确认 CA={}", ca),
+                            ));
+                        }
+                    }
+                    45 => {
+                        if data.len() >= 16 {
+                            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+                            let sco = data[15]; let value = sco & 0x01 != 0; let is_select = sco & 0x80 != 0;
+                            if !is_select {
+                                let rt = tokio::runtime::Handle::try_current();
+                                if let Ok(handle) = rt {
+                                    let stations = stations.clone();
+                                    handle.block_on(async {
+                                        let mut s = stations.write().await;
+                                        if let Some(st) = s.get_mut(&ca) {
+                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                                dp.value = DataPointValue::SinglePoint { value };
+                                                dp.timestamp = Some(chrono::Utc::now());
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            let _ = stream.write_all(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                let _ = stream.write_all(&term);
+                            }
+                            if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::SingleCommand,
+                                    format!("单点命令确认 IOA={} val={} {} CA={}", ioa, value, mode, ca),
+                                ));
+                            }
+                        }
+                    }
+                    46 => {
+                        if data.len() >= 16 {
+                            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+                            let dco = data[15]; let value = dco & 0x03; let is_select = dco & 0x80 != 0;
+                            if !is_select {
+                                let rt = tokio::runtime::Handle::try_current();
+                                if let Ok(handle) = rt {
+                                    let stations = stations.clone();
+                                    handle.block_on(async {
+                                        let mut s = stations.write().await;
+                                        if let Some(st) = s.get_mut(&ca) {
+                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                                dp.value = DataPointValue::DoublePoint { value };
+                                                dp.timestamp = Some(chrono::Utc::now());
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            let _ = stream.write_all(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                let _ = stream.write_all(&term);
+                            }
+                            if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::DoubleCommand,
+                                    format!("双点命令确认 IOA={} val={} {} CA={}", ioa, value, mode, ca),
+                                ));
+                            }
+                        }
+                    }
+                    47 => {
+                        if data.len() >= 16 {
+                            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+                            let rco = data[15]; let step_val = rco & 0x03; let is_select = rco & 0x80 != 0;
+                            if !is_select {
+                                let rt = tokio::runtime::Handle::try_current();
+                                if let Ok(handle) = rt {
+                                    let stations = stations.clone();
+                                    handle.block_on(async {
+                                        let mut s = stations.write().await;
+                                        if let Some(st) = s.get_mut(&ca) {
+                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                                if let DataPointValue::StepPosition { ref mut value, .. } = dp.value {
+                                                    match step_val { 1 => { if *value > -64 { *value -= 1; } } 2 => { if *value < 63 { *value += 1; } } _ => {} }
+                                                    dp.timestamp = Some(chrono::Utc::now());
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            let _ = stream.write_all(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                let _ = stream.write_all(&term);
+                            }
+                            if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                let dir = match step_val { 1 => "降", 2 => "升", _ => "?" };
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::StepCommand,
+                                    format!("步调节命令确认 IOA={} {} {} CA={}", ioa, dir, mode, ca),
+                                ));
+                            }
+                        }
+                    }
+                    48 => {
+                        if data.len() >= 18 {
+                            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+                            let nva = i16::from_le_bytes([data[15], data[16]]);
+                            let qos = data[17]; let is_select = qos & 0x80 != 0;
+                            let value = nva as f32 / 32767.0;
+                            if !is_select {
+                                let rt = tokio::runtime::Handle::try_current();
+                                if let Ok(handle) = rt {
+                                    let stations = stations.clone();
+                                    handle.block_on(async {
+                                        let mut s = stations.write().await;
+                                        if let Some(st) = s.get_mut(&ca) {
+                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                                dp.value = DataPointValue::Normalized { value };
+                                                dp.timestamp = Some(chrono::Utc::now());
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            let _ = stream.write_all(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                let _ = stream.write_all(&term);
+                            }
+                            if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::SetpointNormalized,
+                                    format!("归一化设定值确认 IOA={} val={:.4} {} CA={}", ioa, value, mode, ca),
+                                ));
+                            }
+                        }
+                    }
+                    49 => {
+                        if data.len() >= 18 {
+                            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+                            let sva = i16::from_le_bytes([data[15], data[16]]);
+                            let qos = data[17]; let is_select = qos & 0x80 != 0;
+                            if !is_select {
+                                let rt = tokio::runtime::Handle::try_current();
+                                if let Ok(handle) = rt {
+                                    let stations = stations.clone();
+                                    handle.block_on(async {
+                                        let mut s = stations.write().await;
+                                        if let Some(st) = s.get_mut(&ca) {
+                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                                dp.value = DataPointValue::Scaled { value: sva };
+                                                dp.timestamp = Some(chrono::Utc::now());
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            let _ = stream.write_all(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                let _ = stream.write_all(&term);
+                            }
+                            if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::SetpointScaled,
+                                    format!("标度化设定值确认 IOA={} val={} {} CA={}", ioa, sva, mode, ca),
+                                ));
+                            }
+                        }
+                    }
+                    50 => {
+                        if data.len() >= 20 {
+                            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+                            let value = f32::from_le_bytes([data[15], data[16], data[17], data[18]]);
+                            let qos = data[19]; let is_select = qos & 0x80 != 0;
+                            if !is_select {
+                                let rt = tokio::runtime::Handle::try_current();
+                                if let Ok(handle) = rt {
+                                    let stations = stations.clone();
+                                    handle.block_on(async {
+                                        let mut s = stations.write().await;
+                                        if let Some(st) = s.get_mut(&ca) {
+                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                                dp.value = DataPointValue::ShortFloat { value };
+                                                dp.timestamp = Some(chrono::Utc::now());
+                                            }
+                                        }
+                                    });
+                                }
+                            }
+                            let mut ack = data[..n].to_vec(); ack[8] = 7;
+                            let _ = stream.write_all(&ack);
+                            if !is_select {
+                                let mut term = data[..n].to_vec(); term[8] = 10;
+                                let _ = stream.write_all(&term);
+                            }
+                            if let Some(ref lc) = log_collector {
+                                let mode = if is_select { "Select" } else { "Execute" };
+                                lc.try_add(LogEntry::new(
+                                    Direction::Tx, FrameLabel::SetpointFloat,
+                                    format!("浮点设定值确认 IOA={} val={:.3} {} CA={}", ioa, value, mode, ca),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(ref lc) = log_collector {
+                            lc.try_add(LogEntry::new(
+                                Direction::Rx, FrameLabel::IFrame(format!("Type{}", asdu_type)),
                                 format!("未知 ASDU 类型={} CA={} COT={}", asdu_type, ca, cause),
                             ));
                         }
@@ -698,120 +1262,107 @@ fn handle_client(
     }
 }
 
-/// Send all data points for a station in response to general interrogation.
-fn send_interrogation_response(
-    stream: &mut SlaveStream,
+fn sendGiResponseBlocking(
+    stream: &mut native_tls::TlsStream<TcpStream>,
     station: &Station,
-    log_collector: &Option<Arc<LogCollector>>,
 ) {
+    use std::io::Write;
     let ca_bytes = station.common_address.to_le_bytes();
-
+    let mut ssn: u8 = 0;
+    let mut rsn: u8 = 0;
     for point in station.data_points.all_sorted() {
         let ioa_bytes = point.ioa.to_le_bytes();
-
-        let asdu = match &point.value {
-            DataPointValue::SinglePoint { value } => {
-                // M_SP_NA_1 (Type 1)
-                let siq = if *value { 0x01 } else { 0x00 };
-                build_i_frame(1, 20, &ca_bytes, &ioa_bytes[..3], &[siq])
-            }
-            DataPointValue::DoublePoint { value } => {
-                // M_DP_NA_1 (Type 3)
-                let diq = *value & 0x03;
-                build_i_frame(3, 20, &ca_bytes, &ioa_bytes[..3], &[diq])
-            }
-            DataPointValue::Normalized { value } => {
-                // M_ME_NA_1 (Type 9)
-                let nva = (*value * 32767.0) as i16;
-                let bytes = nva.to_le_bytes();
-                let qds = 0u8; // good quality
-                build_i_frame(9, 20, &ca_bytes, &ioa_bytes[..3], &[bytes[0], bytes[1], qds])
-            }
-            DataPointValue::Scaled { value } => {
-                // M_ME_NB_1 (Type 11)
-                let bytes = value.to_le_bytes();
-                let qds = 0u8;
-                build_i_frame(11, 20, &ca_bytes, &ioa_bytes[..3], &[bytes[0], bytes[1], qds])
-            }
-            DataPointValue::ShortFloat { value } => {
-                // M_ME_NC_1 (Type 13)
-                let bytes = value.to_le_bytes();
-                let qds = 0u8;
-                build_i_frame(13, 20, &ca_bytes, &ioa_bytes[..3], &[bytes[0], bytes[1], bytes[2], bytes[3], qds])
-            }
-            DataPointValue::IntegratedTotal { value, carry, sequence } => {
-                // M_IT_NA_1 (Type 15)
-                let bytes = value.to_le_bytes();
-                let mut bcr = *sequence & 0x1F;
-                if *carry { bcr |= 0x20; }
-                build_i_frame(15, 20, &ca_bytes, &ioa_bytes[..3], &[bytes[0], bytes[1], bytes[2], bytes[3], bcr])
-            }
-            _ => continue,
-        };
-
+        let asdu = encode_point_frame(&point.value, 20, &ca_bytes, &ioa_bytes[..3], &mut ssn, &mut rsn);
         let _ = stream.write_all(&asdu);
-    }
-
-    if let Some(ref lc) = log_collector {
-        lc.try_add(LogEntry::new(
-            Direction::Tx,
-            FrameLabel::GeneralInterrogation,
-            format!("GI 数据发送完成 CA={} 共{}点", station.common_address, station.data_points.len()),
-        ));
     }
 }
 
-/// Build a minimal I-frame APDU.
+// ---------------------------------------------------------------------------
+// I-Frame Builder
+// ---------------------------------------------------------------------------
+
 fn build_i_frame(
-    asdu_type: u8,
-    cause: u8,
-    ca: &[u8],
-    ioa: &[u8],
-    value_bytes: &[u8],
+    asdu_type: u8, cause: u8, ca: &[u8], ioa: &[u8], value_bytes: &[u8],
+    ssn: &mut u8, rsn: &mut u8,
 ) -> Vec<u8> {
-    // APCI header (6 bytes) + ASDU
-    let asdu_len = 6 + ioa.len() + value_bytes.len(); // type(1) + num(1) + cause(2) + ca(2) + ioa + value
-    let total_len = 4 + asdu_len; // control fields (4) + asdu
-
+    let asdu_len = 6 + ioa.len() + value_bytes.len();
+    let total_len = 4 + asdu_len;
     let mut frame = Vec::with_capacity(2 + total_len);
-    frame.push(0x68); // Start byte
-    frame.push(total_len as u8); // Length
-
-    // Control fields (I-frame, seq=0 for simplicity)
-    frame.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-
-    // ASDU header
-    frame.push(asdu_type); // Type ID
-    frame.push(0x01);      // Number of objects = 1
-    frame.push(cause);     // Cause of transmission
-    frame.push(0x00);      // Originator address
-    frame.extend_from_slice(&ca[..2]); // Common address
-
-    // Information object
+    frame.push(0x68);
+    frame.push(total_len as u8);
+    // 4 APCI control bytes for I-frame:
+    // Bytes 2-3: N(S) << 1 (bit 0 = 0 indicates I-frame)
+    // Bytes 4-5: N(R) << 1
+    frame.push(*ssn);
+    frame.push(0x00);
+    frame.push(*rsn);
+    frame.push(0x00);
+    *ssn = ssn.wrapping_add(2) & 0x7F;
+    *rsn = rsn.wrapping_add(2) & 0x7F;
+    frame.extend_from_slice(&[asdu_type, 0x01, cause, 0x00]);
+    frame.extend_from_slice(&ca[..2]);
     frame.extend_from_slice(ioa);
     frame.extend_from_slice(value_bytes);
-
     frame
 }
 
+/// Encode a data point value into an I-frame with the given COT.
+fn encode_point_frame(
+    value: &DataPointValue, cot: u8, ca: &[u8], ioa: &[u8],
+    ssn: &mut u8, rsn: &mut u8,
+) -> Vec<u8> {
+    match value {
+        DataPointValue::SinglePoint { value } => {
+            let siq = if *value { 0x01 } else { 0x00 };
+            build_i_frame(1, cot, ca, ioa, &[siq], ssn, rsn)
+        }
+        DataPointValue::DoublePoint { value } => {
+            let diq = *value & 0x03;
+            build_i_frame(3, cot, ca, ioa, &[diq], ssn, rsn)
+        }
+        DataPointValue::StepPosition { value, transient } => {
+            let vti = ((*value as u8) & 0x7F) | (if *transient { 0x80 } else { 0 });
+            build_i_frame(5, cot, ca, ioa, &[vti, 0], ssn, rsn)
+        }
+        DataPointValue::Bitstring { value } => {
+            let b = value.to_le_bytes();
+            build_i_frame(7, cot, ca, ioa, &[b[0], b[1], b[2], b[3], 0], ssn, rsn)
+        }
+        DataPointValue::Normalized { value } => {
+            let nva = (*value * 32767.0) as i16; let b = nva.to_le_bytes();
+            build_i_frame(9, cot, ca, ioa, &[b[0], b[1], 0u8], ssn, rsn)
+        }
+        DataPointValue::Scaled { value } => {
+            let b = value.to_le_bytes();
+            build_i_frame(11, cot, ca, ioa, &[b[0], b[1], 0u8], ssn, rsn)
+        }
+        DataPointValue::ShortFloat { value } => {
+            let b = value.to_le_bytes();
+            build_i_frame(13, cot, ca, ioa, &[b[0], b[1], b[2], b[3], 0u8], ssn, rsn)
+        }
+        DataPointValue::IntegratedTotal { value, carry, sequence } => {
+            let b = value.to_le_bytes();
+            let mut bcr = *sequence & 0x1F;
+            if *carry { bcr |= 0x20; }
+            build_i_frame(15, cot, ca, ioa, &[b[0], b[1], b[2], b[3], bcr], ssn, rsn)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error Types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, thiserror::Error)]
 pub enum SlaveError {
-    #[error("IOA {0} already exists")]
-    DuplicateIoa(u32),
-    #[error("IOA {0} not found")]
-    IoaNotFound(u32),
-    #[error("station CA={0} already exists")]
-    DuplicateStation(u16),
-    #[error("station CA={0} not found")]
-    StationNotFound(u16),
-    #[error("server is already running")]
-    AlreadyRunning,
-    #[error("server is not running")]
-    NotRunning,
-    #[error("bind error: {0}")]
-    BindError(String),
-    #[error("TLS error: {0}")]
-    TlsError(String),
+    #[error("IOA {0} already exists")] DuplicateIoa(u32),
+    #[error("IOA {0} not found")] IoaNotFound(u32),
+    #[error("station CA={0} already exists")] DuplicateStation(u16),
+    #[error("station CA={0} not found")] StationNotFound(u16),
+    #[error("server is already running")] AlreadyRunning,
+    #[error("server is not running")] NotRunning,
+    #[error("bind error: {0}")] BindError(String),
+    #[error("TLS error: {0}")] TlsError(String),
 }
 
 #[cfg(test)]
@@ -820,43 +1371,14 @@ mod tests {
 
     #[test]
     fn test_station_creation() {
-        let station = Station::new(1, "测试站");
-        assert_eq!(station.common_address, 1);
-        assert_eq!(station.name, "测试站");
-        assert!(station.data_points.is_empty());
+        let s = Station::new(1, "测试站");
+        assert_eq!(s.common_address, 1);
     }
 
     #[test]
     fn test_station_with_default_points() {
-        let station = Station::with_default_points(1, "站1", 10);
-        // 6 categories x 10 = 60 points
-        assert_eq!(station.data_points.len(), 60);
-        assert_eq!(station.object_defs.len(), 60);
-    }
-
-    #[test]
-    fn test_station_add_remove_point() {
-        let mut station = Station::new(1, "测试");
-        let def = InformationObjectDef {
-            ioa: 100,
-            asdu_type: AsduTypeId::MSpNa1,
-            category: DataCategory::SinglePoint,
-            name: "测试点".to_string(),
-            comment: String::new(),
-        };
-
-        station.add_point(def.clone()).unwrap();
-        assert_eq!(station.data_points.len(), 1);
-
-        // Duplicate should fail
-        assert!(station.add_point(def).is_err());
-
-        // Remove
-        station.remove_point(100).unwrap();
-        assert!(station.data_points.is_empty());
-
-        // Remove again should fail
-        assert!(station.remove_point(100).is_err());
+        let s = Station::with_default_points(1, "站1", 10);
+        assert_eq!(s.data_points.len(), 60);
     }
 
     #[tokio::test]
@@ -864,15 +1386,6 @@ mod tests {
         let server = SlaveServer::new(SlaveTransportConfig::default());
         let station = Station::new(1, "站1");
         server.add_station(station).await.unwrap();
-
-        // Duplicate should fail
         assert!(server.add_station(Station::new(1, "重复")).await.is_err());
-
-        // Remove
-        let removed = server.remove_station(1).await.unwrap();
-        assert_eq!(removed.common_address, 1);
-
-        // Remove again should fail
-        assert!(server.remove_station(1).await.is_err());
     }
 }

@@ -403,6 +403,9 @@ pub async fn update_data_point(
     point.value = new_value;
     point.timestamp = Some(chrono::Utc::now());
 
+    drop(stations);
+    srv.server.queue_spontaneous(common_address, &[ioa]).await;
+
     Ok(())
 }
 
@@ -513,55 +516,91 @@ pub async fn random_mutate_data_points(
         .get_mut(&request.common_address)
         .ok_or_else(|| format!("station CA={} not found", request.common_address))?;
 
-    let mut rng = rand::rng();
-    let mut mutated = 0u32;
+    let (mutated, changed_ioas) = {
+        let mut rng = rand::rng();
+        let mut mutated = 0u32;
+        let mut changed_ioas = Vec::new();
 
-    let ioas: Vec<u32> = station.data_points.points.keys().copied().collect();
-    let count = (ioas.len() * 30 / 100).max(3).min(ioas.len());
+        let ioas: Vec<u32> = station.data_points.points.keys().copied().collect();
+        let count = (ioas.len() * 30 / 100).max(3).min(ioas.len());
 
-    let mut pick = ioas;
-    for i in (1..pick.len()).rev() {
-        let j = rng.random_range(0..=i);
-        pick.swap(i, j);
-    }
-
-    for &ioa in &pick[..count] {
-        if let Some(point) = station.data_points.get_mut(ioa) {
-            point.value = match &point.value {
-                DataPointValue::SinglePoint { value } => {
-                    DataPointValue::SinglePoint { value: !value }
-                }
-                DataPointValue::DoublePoint { value } => {
-                    DataPointValue::DoublePoint { value: if *value == 1 { 2 } else { 1 } }
-                }
-                DataPointValue::Normalized { value } => {
-                    let delta: f32 = rng.random_range(-0.1..0.1);
-                    DataPointValue::Normalized { value: (*value + delta).clamp(-1.0, 1.0) }
-                }
-                DataPointValue::Scaled { value } => {
-                    let delta: i16 = rng.random_range(-100..100);
-                    DataPointValue::Scaled { value: value.saturating_add(delta) }
-                }
-                DataPointValue::ShortFloat { value } => {
-                    let delta: f32 = rng.random_range(-10.0..10.0);
-                    DataPointValue::ShortFloat { value: value + delta }
-                }
-                DataPointValue::IntegratedTotal { value, carry, sequence } => {
-                    let delta: i32 = rng.random_range(0..100);
-                    DataPointValue::IntegratedTotal {
-                        value: value + delta,
-                        carry: *carry,
-                        sequence: *sequence,
-                    }
-                }
-                other => other.clone(),
-            };
-            point.timestamp = Some(chrono::Utc::now());
-            mutated += 1;
+        let mut pick = ioas;
+        for i in (1..pick.len()).rev() {
+            let j = rng.random_range(0..=i);
+            pick.swap(i, j);
         }
-    }
+
+        for &ioa in &pick[..count] {
+            if let Some(point) = station.data_points.get_mut(ioa) {
+                point.value = match &point.value {
+                    DataPointValue::SinglePoint { value } => {
+                        DataPointValue::SinglePoint { value: !value }
+                    }
+                    DataPointValue::DoublePoint { value } => {
+                        DataPointValue::DoublePoint { value: if *value == 1 { 2 } else { 1 } }
+                    }
+                    DataPointValue::Normalized { value } => {
+                        let delta: f32 = rng.random_range(-0.1..0.1);
+                        DataPointValue::Normalized { value: (*value + delta).clamp(-1.0, 1.0) }
+                    }
+                    DataPointValue::Scaled { value } => {
+                        let delta: i16 = rng.random_range(-100..100);
+                        DataPointValue::Scaled { value: value.saturating_add(delta) }
+                    }
+                    DataPointValue::ShortFloat { value } => {
+                        let delta: f32 = rng.random_range(-10.0..10.0);
+                        DataPointValue::ShortFloat { value: value + delta }
+                    }
+                    DataPointValue::IntegratedTotal { value, carry, sequence } => {
+                        let delta: i32 = rng.random_range(0..100);
+                        DataPointValue::IntegratedTotal {
+                            value: value + delta,
+                            carry: *carry,
+                            sequence: *sequence,
+                        }
+                    }
+                    other => other.clone(),
+                };
+                point.timestamp = Some(chrono::Utc::now());
+                changed_ioas.push(ioa);
+                mutated += 1;
+            }
+        }
+        (mutated, changed_ioas)
+    }; // rng dropped here
+
+    drop(stations);
+    srv.server.queue_spontaneous(request.common_address, &changed_ioas).await;
 
     Ok(mutated)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct CyclicConfigRequest {
+    pub server_id: String,
+    pub common_address: u16,
+    pub enabled: bool,
+    pub interval_ms: u32,
+}
+
+#[tauri::command]
+pub async fn set_cyclic_config(
+    state: State<'_, AppState>,
+    request: CyclicConfigRequest,
+) -> Result<(), String> {
+    use iec104sim_core::slave::CyclicConfig;
+    let servers = state.servers.read().await;
+    let srv = servers
+        .get(&request.server_id)
+        .ok_or_else(|| format!("server {} not found", request.server_id))?;
+    srv.server
+        .set_cyclic_config(
+            request.common_address,
+            CyclicConfig { enabled: request.enabled, interval_ms: request.interval_ms },
+        )
+        .await
+        .map_err(|e| format!("{:?}", e))
 }
 
 // ---------------------------------------------------------------------------

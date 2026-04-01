@@ -18,6 +18,8 @@ const CATEGORIES = [
   '累计量 (IT)',
 ]
 
+const sharedCategoryCounts = inject<Ref<Map<string, number>>>('categoryCounts')!
+
 interface TreeServer {
   server: ServerInfo
   expanded: boolean
@@ -231,6 +233,9 @@ function isCategorySelected(ts: TreeServer, tst: TreeStation, category: string):
               @click.stop="selectCategory(ts, tst, cat)"
             >
               <span class="node-label">{{ cat }}</span>
+              <span class="node-badge" v-if="sharedCategoryCounts.get(cat)">
+                {{ sharedCategoryCounts.get(cat) }}
+              </span>
             </div>
           </template>
         </div>

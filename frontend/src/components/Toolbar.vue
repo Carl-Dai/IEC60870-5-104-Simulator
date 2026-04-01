@@ -44,7 +44,7 @@ async function submitNewServer() {
   }
   showNewServerModal.value = false
   try {
-    await invoke('create_server', {
+    const info = await invoke<{ id: string }>('create_server', {
       request: {
         port,
         init_mode: newServerInitMode.value,
@@ -55,6 +55,7 @@ async function submitNewServer() {
         require_client_cert: newServerRequireClientCert.value || undefined,
       },
     })
+    await invoke('start_server', { id: info.id })
     refreshTree()
   } catch (e) {
     await showAlert(String(e))
@@ -105,31 +106,6 @@ async function addStation() {
       },
     })
     refreshTree()
-  } catch (e) {
-    await showAlert(String(e))
-  }
-}
-
-// --- Add Data Point ---
-async function addDataPoint() {
-  if (!selectedServerId.value || selectedCA.value === null) return
-  const ioaStr = await showPrompt('输入信息对象地址 (IOA)', '1')
-  if (ioaStr === null) return
-  const ioa = Number(ioaStr)
-  if (isNaN(ioa) || ioa < 0) {
-    await showAlert('请输入有效的 IOA')
-    return
-  }
-  try {
-    await invoke('add_data_point', {
-      request: {
-        server_id: selectedServerId.value,
-        common_address: selectedCA.value,
-        ioa,
-        asdu_type: 'MSpNa1',
-      },
-    })
-    refreshData()
   } catch (e) {
     await showAlert(String(e))
   }
@@ -191,6 +167,32 @@ watch([selectedServerId, selectedCA], () => {
 onUnmounted(() => {
   if (mutationTimer !== null) clearTimeout(mutationTimer)
 })
+
+// --- Cyclic Transmission ---
+const cyclicActive = ref(false)
+const cyclicInterval = ref(2000)
+
+async function toggleCyclic() {
+  if (!selectedServerId.value || selectedCA.value === null) return
+  cyclicActive.value = !cyclicActive.value
+  try {
+    await invoke('set_cyclic_config', {
+      request: {
+        server_id: selectedServerId.value,
+        common_address: selectedCA.value,
+        enabled: cyclicActive.value,
+        interval_ms: cyclicInterval.value,
+      },
+    })
+  } catch (e) {
+    await showAlert(String(e))
+    cyclicActive.value = false
+  }
+}
+
+watch([selectedServerId, selectedCA], () => {
+  cyclicActive.value = false
+})
 </script>
 
 <template>
@@ -230,17 +232,9 @@ onUnmounted(() => {
       >
         <span class="toolbar-label">添加站</span>
       </button>
-      <button
-        class="toolbar-btn"
-        @click="addDataPoint"
-        :disabled="!selectedServerId || selectedCA === null"
-        title="添加数据点"
-      >
-        <span class="toolbar-label">添加数据点</span>
-      </button>
     </div>
     <div class="toolbar-divider"></div>
-    <div class="toolbar-group mutation-group">
+    <div class="toolbar-group interval-group">
       <button
         :class="['toolbar-btn', { 'btn-mutation-active': mutationActive }]"
         @click="toggleMutation"
@@ -250,15 +244,36 @@ onUnmounted(() => {
         <span class="toolbar-label">{{ mutationActive ? '停止变化' : '随机变化' }}</span>
       </button>
       <input
-        type="range"
-        class="rate-slider"
+        type="number"
+        class="interval-input"
         min="100"
-        max="5000"
+        max="60000"
         step="100"
         v-model.number="mutationRate"
         title="变化间隔 (ms)"
       />
-      <span class="rate-label">{{ mutationRate }}ms</span>
+      <span class="rate-label">ms</span>
+    </div>
+    <div class="toolbar-divider"></div>
+    <div class="toolbar-group interval-group">
+      <button
+        :class="['toolbar-btn', { 'btn-cyclic-active': cyclicActive }]"
+        @click="toggleCyclic"
+        :disabled="!selectedServerId || selectedCA === null"
+        title="周期发送"
+      >
+        <span class="toolbar-label">{{ cyclicActive ? '停止周期' : '周期发送' }}</span>
+      </button>
+      <input
+        type="number"
+        class="interval-input"
+        min="100"
+        max="60000"
+        step="100"
+        v-model.number="cyclicInterval"
+        title="发送间隔 (ms)"
+      />
+      <span class="rate-label">ms</span>
     </div>
     <div class="toolbar-title">IEC 104 Slave</div>
   </div>
@@ -403,21 +418,47 @@ onUnmounted(() => {
   background: #94e2d5;
 }
 
-.mutation-group {
+.toolbar-btn.btn-cyclic-active {
+  background: #cba6f7;
+  color: #1e1e2e;
+  font-weight: 600;
+}
+
+.toolbar-btn.btn-cyclic-active:hover {
+  background: #b4befe;
+}
+
+.interval-group {
   align-items: center;
 }
 
-.rate-slider {
-  width: 80px;
-  height: 4px;
-  accent-color: #89b4fa;
-  cursor: pointer;
+.interval-input {
+  width: 60px;
+  padding: 2px 4px;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  color: #cdd6f4;
+  font-size: 11px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+
+.interval-input::-webkit-inner-spin-button,
+.interval-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.interval-input:focus {
+  outline: none;
+  border-color: #89b4fa;
 }
 
 .rate-label {
   font-size: 10px;
   color: #6c7086;
-  min-width: 42px;
   font-family: 'SF Mono', 'Fira Code', monospace;
 }
 

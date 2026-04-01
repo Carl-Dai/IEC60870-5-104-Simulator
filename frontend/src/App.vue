@@ -8,6 +8,8 @@ import LogPanel from './components/LogPanel.vue'
 import AppDialog from './components/AppDialog.vue'
 import { showAlert, showConfirm, showPrompt, dialogKey } from './composables/useDialog'
 
+const dataPointTableRef = ref<InstanceType<typeof DataPointTable> | null>(null)
+
 // Shared state
 const selectedServerId = ref<string | null>(null)
 const selectedServerState = ref<string>('Stopped')
@@ -40,6 +42,10 @@ function refreshData() {
   dataRefreshKey.value++
 }
 provide('refreshData', refreshData)
+
+// Realtime category counts derived from DataPointTable's dataMap
+const categoryCounts = ref<Map<string, number>>(new Map())
+provide('categoryCounts', categoryCounts)
 provide(dialogKey, { showAlert, showConfirm, showPrompt })
 
 function handleServerSelect(id: string, state: string) {
@@ -55,6 +61,7 @@ function handleStationSelect(serverId: string, ca: number) {
   selectedCA.value = ca
   selectedCategory.value = null
   selectedPoints.value = []
+  dataPointTableRef.value?.loadData()
 }
 
 function handleCategorySelect(serverId: string, ca: number, category: string) {
@@ -62,6 +69,7 @@ function handleCategorySelect(serverId: string, ca: number, category: string) {
   selectedCA.value = ca
   selectedCategory.value = category
   selectedPoints.value = []
+  dataPointTableRef.value?.loadData()
 }
 
 function handlePointSelect(points: { ioa: number; value: string }[]) {
@@ -88,6 +96,7 @@ function toggleLog() {
     </aside>
     <main class="content-area">
       <DataPointTable
+        ref="dataPointTableRef"
         @point-select="handlePointSelect"
       />
     </main>

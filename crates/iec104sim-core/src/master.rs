@@ -8,6 +8,29 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// A control command response received from the slave.
+#[derive(Debug, Clone)]
+pub struct ControlResponse {
+    pub ioa: u32,
+    pub asdu_type: u8,
+    pub cot: u8,
+    pub positive: bool,
+}
+
+/// Result of a control command execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlResult {
+    pub steps: Vec<ControlStep>,
+    pub duration_ms: u64,
+}
+
+/// A single step in a control command execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlStep {
+    pub action: String,
+    pub timestamp: String,
+}
+
 // ---------------------------------------------------------------------------
 // TLS Configuration
 // ---------------------------------------------------------------------------
@@ -162,6 +185,21 @@ impl Default for MasterConfig {
 /// Received data storage.
 pub type SharedReceivedData = Arc<RwLock<DataPointMap>>;
 
+/// Shared sequence number counters for IEC 104 protocol.
+#[derive(Debug)]
+pub struct SeqNumbers {
+    /// Send Sequence Number (incremented for each I-frame sent)
+    pub ssn: u16,
+    /// Receive Sequence Number (incremented for each I-frame received)
+    pub rsn: u16,
+}
+
+impl SeqNumbers {
+    pub fn new() -> Self {
+        Self { ssn: 0, rsn: 0 }
+    }
+}
+
 /// An IEC 104 master connection.
 pub struct MasterConnection {
     pub config: MasterConfig,
@@ -173,10 +211,15 @@ pub struct MasterConnection {
     /// Mutex-protected TLS stream for send operations (TLS streams cannot be cloned).
     tls_stream_mutex: Option<Arc<std::sync::Mutex<MasterStream>>>,
     receiver_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Shared sequence numbers for SSN/RSN tracking.
+    seq: Arc<std::sync::Mutex<SeqNumbers>>,
+    /// Broadcast channel for control command responses (COT=7, COT=10).
+    control_tx: tokio::sync::broadcast::Sender<ControlResponse>,
 }
 
 impl MasterConnection {
     pub fn new(config: MasterConfig) -> Self {
+        let (control_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             config,
             received_data: Arc::new(RwLock::new(DataPointMap::new())),
@@ -186,6 +229,8 @@ impl MasterConnection {
             stream: Arc::new(RwLock::new(None)),
             tls_stream_mutex: None,
             receiver_handle: None,
+            seq: Arc::new(std::sync::Mutex::new(SeqNumbers::new())),
+            control_tx,
         }
     }
 
@@ -205,6 +250,8 @@ impl MasterConnection {
         }
 
         *self.state.write().await = MasterState::Connecting;
+        // Reset sequence numbers on new connection
+        *self.seq.lock().unwrap() = SeqNumbers::new();
 
         let addr = format!("{}:{}", self.config.target_address, self.config.port);
         let timeout = std::time::Duration::from_millis(self.config.timeout_ms);
@@ -293,9 +340,11 @@ impl MasterConnection {
             let log_collector = self.log_collector.clone();
             let state = self.state.clone();
             let stream_for_receiver = stream_mutex.clone();
+            let seq = self.seq.clone();
+            let control_tx = self.control_tx.clone();
 
             let handle = tokio::task::spawn_blocking(move || {
-                receive_loop_mutex(stream_for_receiver, received_data, log_collector, shutdown_flag, state);
+                receive_loop_mutex(stream_for_receiver, received_data, log_collector, shutdown_flag, state, seq, control_tx);
             });
 
             self.receiver_handle = Some(handle);
@@ -319,9 +368,11 @@ impl MasterConnection {
             let received_data = self.received_data.clone();
             let log_collector = self.log_collector.clone();
             let state = self.state.clone();
+            let seq = self.seq.clone();
+            let control_tx = self.control_tx.clone();
 
             let handle = tokio::task::spawn_blocking(move || {
-                receive_loop(stream_clone, received_data, log_collector, shutdown_flag, state);
+                receive_loop(stream_clone, received_data, log_collector, shutdown_flag, state, seq, control_tx);
             });
 
             self.receiver_handle = Some(handle);
@@ -459,28 +510,154 @@ impl MasterConnection {
         self.send_frame(&frame, &detail, FrameLabel::DoubleCommand, ca).await
     }
 
+    /// Send Step Command.
+    pub async fn send_step_command(&self, ioa: u32, value: u8, select: bool, ca: u16) -> Result<(), MasterError> {
+        let frame = build_step_command(ca, ioa, value, select);
+        let detail = format!("步调节命令 IOA={} val={} sel={}", ioa, value, select);
+        self.send_frame(&frame, &detail, FrameLabel::StepCommand, ca).await
+    }
+
+    /// Send Set-point (normalized) command.
+    pub async fn send_setpoint_normalized(&self, ioa: u32, value: f32, select: bool, ca: u16) -> Result<(), MasterError> {
+        let frame = build_setpoint_normalized(ca, ioa, value, select);
+        let detail = format!("归一化设定值 IOA={} val={:.4} sel={}", ioa, value, select);
+        self.send_frame(&frame, &detail, FrameLabel::SetpointNormalized, ca).await
+    }
+
+    /// Send Set-point (scaled) command.
+    pub async fn send_setpoint_scaled(&self, ioa: u32, value: i16, select: bool, ca: u16) -> Result<(), MasterError> {
+        let frame = build_setpoint_scaled(ca, ioa, value, select);
+        let detail = format!("标度化设定值 IOA={} val={} sel={}", ioa, value, select);
+        self.send_frame(&frame, &detail, FrameLabel::SetpointScaled, ca).await
+    }
+
     /// Send Set-point (short float) command.
-    pub async fn send_setpoint_float(&self, ioa: u32, value: f32, ca: u16) -> Result<(), MasterError> {
-        let frame = build_setpoint_float_command(ca, ioa, value);
-        let detail = format!("浮点设定值 IOA={} val={:.3}", ioa, value);
+    pub async fn send_setpoint_float(&self, ioa: u32, value: f32, select: bool, ca: u16) -> Result<(), MasterError> {
+        let frame = build_setpoint_float_command(ca, ioa, value, select);
+        let detail = format!("浮点设定值 IOA={} val={:.3} sel={}", ioa, value, select);
         self.send_frame(&frame, &detail, FrameLabel::SetpointFloat, ca).await
     }
 
+    /// Subscribe to control responses (for SbO flow).
+    pub fn subscribe_control_responses(&self) -> tokio::sync::broadcast::Receiver<ControlResponse> {
+        self.control_tx.subscribe()
+    }
+
+    /// Execute a control command with automatic Select-before-Execute.
+    /// Sends Select, waits for confirmation, then sends Execute.
+    pub async fn send_control_with_sbo(
+        &self,
+        select_frame: Vec<u8>,
+        execute_frame: Vec<u8>,
+        ioa: u32,
+        detail_prefix: &str,
+        label: FrameLabel,
+        ca: u16,
+    ) -> Result<ControlResult, MasterError> {
+        use std::time::Instant;
+        let start = Instant::now();
+        let mut steps = Vec::new();
+        let mut rx = self.control_tx.subscribe();
+
+        // Step 1: Send Select frame
+        self.send_frame(&select_frame, &format!("{} (Select)", detail_prefix), label.clone(), ca).await?;
+        steps.push(ControlStep {
+            action: "select_sent".to_string(),
+            timestamp: chrono::Utc::now().format("%H:%M:%S%.3f").to_string(),
+        });
+
+        // Step 2: Wait for Select confirmation (COT=7)
+        let select_confirmed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Self::wait_for_response(&mut rx, ioa, 7),
+        ).await;
+
+        match select_confirmed {
+            Ok(Ok(resp)) => {
+                if !resp.positive {
+                    return Err(MasterError::SendError("选择被拒绝 (否定确认)".to_string()));
+                }
+                steps.push(ControlStep {
+                    action: "select_confirmed".to_string(),
+                    timestamp: chrono::Utc::now().format("%H:%M:%S%.3f").to_string(),
+                });
+            }
+            Ok(Err(e)) => return Err(MasterError::SendError(format!("等待选择确认失败: {}", e))),
+            Err(_) => return Err(MasterError::SendError("选择确认超时 (5s)".to_string())),
+        }
+
+        // Step 3: Send Execute frame
+        self.send_frame(&execute_frame, &format!("{} (Execute)", detail_prefix), label, ca).await?;
+        steps.push(ControlStep {
+            action: "execute_sent".to_string(),
+            timestamp: chrono::Utc::now().format("%H:%M:%S%.3f").to_string(),
+        });
+
+        // Step 4: Wait for Execute confirmation (COT=7)
+        let exec_confirmed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Self::wait_for_response(&mut rx, ioa, 7),
+        ).await;
+
+        match exec_confirmed {
+            Ok(Ok(resp)) => {
+                if !resp.positive {
+                    return Err(MasterError::SendError("执行被拒绝 (否定确认)".to_string()));
+                }
+                steps.push(ControlStep {
+                    action: "execute_confirmed".to_string(),
+                    timestamp: chrono::Utc::now().format("%H:%M:%S%.3f").to_string(),
+                });
+            }
+            Ok(Err(e)) => return Err(MasterError::SendError(format!("等待执行确认失败: {}", e))),
+            Err(_) => return Err(MasterError::SendError("执行确认超时 (5s)".to_string())),
+        }
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        Ok(ControlResult { steps, duration_ms })
+    }
+
+    /// Wait for a ControlResponse matching the given IOA and COT.
+    async fn wait_for_response(
+        rx: &mut tokio::sync::broadcast::Receiver<ControlResponse>,
+        ioa: u32,
+        expected_cot: u8,
+    ) -> Result<ControlResponse, String> {
+        loop {
+            match rx.recv().await {
+                Ok(resp) if resp.ioa == ioa && resp.cot == expected_cot => return Ok(resp),
+                Ok(_) => continue, // Not our response, keep waiting
+                Err(e) => return Err(format!("broadcast recv error: {}", e)),
+            }
+        }
+    }
+
     async fn send_frame(&self, frame: &[u8], detail: &str, label: FrameLabel, ca: u16) -> Result<(), MasterError> {
+        // Patch the frame with current SSN/RSN
+        let mut frame = frame.to_vec();
+        {
+            let mut seq = self.seq.lock().unwrap();
+            let ssn_bytes = (seq.ssn << 1).to_le_bytes();
+            let rsn_bytes = (seq.rsn << 1).to_le_bytes();
+            frame[2] = ssn_bytes[0];
+            frame[3] = ssn_bytes[1];
+            frame[4] = rsn_bytes[0];
+            frame[5] = rsn_bytes[1];
+            seq.ssn = seq.ssn.wrapping_add(1);
+        }
+
         if let Some(ref mutex) = self.tls_stream_mutex {
-            // TLS path: write through the shared mutex
             let mut stream = mutex.lock()
                 .map_err(|e| MasterError::SendError(format!("mutex lock failed: {}", e)))?;
-            stream.write_all(frame)
+            stream.write_all(&frame)
                 .map_err(|e| MasterError::SendError(format!("{}: {}", detail, e)))?;
         } else {
-            // Plain TCP path
             let stream_guard = self.stream.read().await;
             let stream = stream_guard.as_ref()
                 .ok_or(MasterError::NotConnected)?;
             match stream {
                 MasterStream::Plain(s) => {
-                    (&*s).write_all(frame)
+                    (&*s).write_all(&frame)
                         .map_err(|e| MasterError::SendError(format!("{}: {}", detail, e)))?;
                 }
                 MasterStream::Tls(_) => unreachable!("TLS stream should use tls_stream_mutex"),
@@ -507,15 +684,18 @@ fn receive_loop(
     log_collector: Option<Arc<LogCollector>>,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
     state: Arc<RwLock<MasterState>>,
+    seq: Arc<std::sync::Mutex<SeqNumbers>>,
+    control_tx: tokio::sync::broadcast::Sender<ControlResponse>,
 ) {
-    let mut buf = [0u8; 1024];
+    let mut reassembly_buf = Vec::with_capacity(65536);
+    let mut read_buf = [0u8; 8192];
 
     loop {
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
 
-        let n = match stream.read(&mut buf) {
+        let n = match stream.read(&mut read_buf) {
             Ok(0) => {
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     let state = state.clone();
@@ -532,18 +712,21 @@ fn receive_loop(
             Err(_) => break,
         };
 
-        let data = &buf[..n];
-        let mut offset = 0;
-        while offset < n {
-            if data[offset] != 0x68 || offset + 1 >= n {
-                offset += 1;
+        reassembly_buf.extend_from_slice(&read_buf[..n]);
+
+        // Extract complete frames from the reassembly buffer
+        while reassembly_buf.len() >= 2 {
+            // Find the start byte 0x68
+            if reassembly_buf[0] != 0x68 {
+                reassembly_buf.remove(0);
                 continue;
             }
-            let frame_len = data[offset + 1] as usize + 2;
-            if offset + frame_len > n { break; }
-            let frame_data = &data[offset..offset + frame_len];
-            process_received_frame(frame_data, &received_data, &log_collector, &mut stream);
-            offset += frame_len;
+            let frame_len = reassembly_buf[1] as usize + 2;
+            if reassembly_buf.len() < frame_len {
+                break; // Wait for more data
+            }
+            let frame_data: Vec<u8> = reassembly_buf.drain(..frame_len).collect();
+            process_received_frame(&frame_data, &received_data, &log_collector, &mut stream, &seq, &control_tx);
         }
     }
 }
@@ -555,8 +738,11 @@ fn receive_loop_mutex(
     log_collector: Option<Arc<LogCollector>>,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
     state: Arc<RwLock<MasterState>>,
+    seq: Arc<std::sync::Mutex<SeqNumbers>>,
+    control_tx: tokio::sync::broadcast::Sender<ControlResponse>,
 ) {
-    let mut buf = [0u8; 1024];
+    let mut reassembly_buf = Vec::with_capacity(65536);
+    let mut read_buf = [0u8; 8192];
 
     loop {
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
@@ -568,7 +754,7 @@ fn receive_loop_mutex(
                 Ok(s) => s,
                 Err(_) => break,
             };
-            match locked.read(&mut buf) {
+            match locked.read(&mut read_buf) {
                 Ok(0) => {
                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
                         let state = state.clone();
@@ -586,18 +772,19 @@ fn receive_loop_mutex(
             }
         };
 
-        let data = &buf[..n];
-        let mut offset = 0;
-        while offset < n {
-            if data[offset] != 0x68 || offset + 1 >= n {
-                offset += 1;
+        reassembly_buf.extend_from_slice(&read_buf[..n]);
+
+        while reassembly_buf.len() >= 2 {
+            if reassembly_buf[0] != 0x68 {
+                reassembly_buf.remove(0);
                 continue;
             }
-            let frame_len = data[offset + 1] as usize + 2;
-            if offset + frame_len > n { break; }
-            let frame_data = &data[offset..offset + frame_len];
-            process_received_frame_mutex(frame_data, &received_data, &log_collector, &stream);
-            offset += frame_len;
+            let frame_len = reassembly_buf[1] as usize + 2;
+            if reassembly_buf.len() < frame_len {
+                break;
+            }
+            let frame_data: Vec<u8> = reassembly_buf.drain(..frame_len).collect();
+            process_received_frame_mutex(&frame_data, &received_data, &log_collector, &stream, &seq, &control_tx);
         }
     }
 }
@@ -608,19 +795,37 @@ fn process_received_frame(
     received_data: &SharedReceivedData,
     log_collector: &Option<Arc<LogCollector>>,
     stream: &mut TcpStream,
+    seq: &Arc<std::sync::Mutex<SeqNumbers>>,
+    control_tx: &tokio::sync::broadcast::Sender<ControlResponse>,
 ) {
     if data.len() < 6 { return; }
     let ctrl1 = data[2];
 
+    // U-frame (bits 0,1 both set)
     if ctrl1 & 0x03 == 0x03 {
         log_frame(data, log_collector);
         if ctrl1 == 0x43 {
+            // TESTFR ACT → reply with TESTFR CON
             let response = [0x68, 0x04, 0x83, 0x00, 0x00, 0x00];
             let _ = stream.write_all(&response);
         }
-    } else if ctrl1 & 0x01 == 0 && data.len() >= 12 {
-        parse_and_store_asdu(data, received_data, log_collector);
-        let s_frame = [0x68, 0x04, 0x01, 0x00, 0x00, 0x00];
+    }
+    // S-frame (bit 0 = 1, bit 1 = 0) — just an acknowledgment, nothing to do
+    else if ctrl1 & 0x01 == 0x01 {
+        log_frame(data, log_collector);
+    }
+    // I-frame (bit 0 = 0)
+    else if ctrl1 & 0x01 == 0 && data.len() >= 12 {
+        // Increment RSN for each received I-frame
+        let rsn = {
+            let mut s = seq.lock().unwrap();
+            s.rsn = s.rsn.wrapping_add(1);
+            s.rsn
+        };
+        parse_and_store_asdu(data, received_data, log_collector, control_tx);
+        // Send S-frame with current RSN to acknowledge
+        let rsn_bytes = (rsn << 1).to_le_bytes();
+        let s_frame = [0x68, 0x04, 0x01, 0x00, rsn_bytes[0], rsn_bytes[1]];
         let _ = stream.write_all(&s_frame);
     }
 }
@@ -631,6 +836,8 @@ fn process_received_frame_mutex(
     received_data: &SharedReceivedData,
     log_collector: &Option<Arc<LogCollector>>,
     stream: &Arc<std::sync::Mutex<MasterStream>>,
+    seq: &Arc<std::sync::Mutex<SeqNumbers>>,
+    control_tx: &tokio::sync::broadcast::Sender<ControlResponse>,
 ) {
     if data.len() < 6 { return; }
     let ctrl1 = data[2];
@@ -643,9 +850,17 @@ fn process_received_frame_mutex(
                 let _ = locked.write_all(&response);
             }
         }
+    } else if ctrl1 & 0x01 == 0x01 {
+        log_frame(data, log_collector);
     } else if ctrl1 & 0x01 == 0 && data.len() >= 12 {
-        parse_and_store_asdu(data, received_data, log_collector);
-        let s_frame = [0x68, 0x04, 0x01, 0x00, 0x00, 0x00];
+        let rsn = {
+            let mut s = seq.lock().unwrap();
+            s.rsn = s.rsn.wrapping_add(1);
+            s.rsn
+        };
+        parse_and_store_asdu(data, received_data, log_collector, control_tx);
+        let rsn_bytes = (rsn << 1).to_le_bytes();
+        let s_frame = [0x68, 0x04, 0x01, 0x00, rsn_bytes[0], rsn_bytes[1]];
         if let Ok(mut locked) = stream.lock() {
             let _ = locked.write_all(&s_frame);
         }
@@ -667,15 +882,83 @@ fn log_frame(data: &[u8], log_collector: &Option<Arc<LogCollector>>) {
     }
 }
 
+/// Get the data element size (excluding IOA) for a given ASDU type.
+/// Returns (value_bytes, has_timestamp_7bytes).
+fn asdu_element_size(asdu_type: u8) -> Option<(usize, bool)> {
+    match asdu_type {
+        1  => Some((1, false)),  // M_SP_NA_1: SIQ
+        30 => Some((1, true)),   // M_SP_TB_1: SIQ + CP56Time2a
+        3  => Some((1, false)),  // M_DP_NA_1: DIQ
+        31 => Some((1, true)),   // M_DP_TB_1: DIQ + CP56Time2a
+        5  => Some((2, false)),  // M_ST_NA_1: VTI(1) + QDS(1)
+        32 => Some((2, true)),   // M_ST_TB_1: VTI(1) + QDS(1) + CP56Time2a
+        7  => Some((5, false)),  // M_BO_NA_1: BSI(4) + QDS(1)
+        33 => Some((5, true)),   // M_BO_TB_1: BSI(4) + QDS(1) + CP56Time2a
+        9  => Some((3, false)),  // M_ME_NA_1: NVA(2) + QDS(1)
+        34 => Some((3, true)),   // M_ME_TD_1: NVA(2) + QDS(1) + CP56Time2a
+        11 => Some((3, false)),  // M_ME_NB_1: SVA(2) + QDS(1)
+        35 => Some((3, true)),   // M_ME_TE_1: SVA(2) + QDS(1) + CP56Time2a
+        13 => Some((5, false)),  // M_ME_NC_1: float(4) + QDS(1)
+        36 => Some((5, true)),   // M_ME_TF_1: float(4) + QDS(1) + CP56Time2a
+        15 => Some((5, false)),  // M_IT_NA_1: BCR(4+1)
+        37 => Some((5, true)),   // M_IT_TB_1: BCR(4+1) + CP56Time2a
+        100 => Some((1, false)), // C_IC_NA_1: QOI
+        101 => Some((1, false)), // C_CI_NA_1: QCC
+        103 => Some((7, false)), // C_CS_NA_1: CP56Time2a
+        _ => None,
+    }
+}
+
 /// Parse ASDU from an I-frame and store data points.
 fn parse_and_store_asdu(
     data: &[u8],
     received_data: &SharedReceivedData,
     log_collector: &Option<Arc<LogCollector>>,
+    control_tx: &tokio::sync::broadcast::Sender<ControlResponse>,
 ) {
+    if data.len() < 12 { return; }
+
     let asdu_type = data[6];
-    let num_objects = data[7] & 0x7F;
+    let vsq = data[7];
+    let sq = vsq & 0x80 != 0;
+    let num_objects = (vsq & 0x7F) as usize;
     let cause = data[8];
+
+    // Handle control command responses (Type 45-50): COT=7 (confirm) or COT=10 (terminate)
+    if matches!(asdu_type, 45..=50) {
+        let cot = cause & 0x3F;
+        let positive = cause & 0x40 == 0; // bit 6 = 0 means positive
+        if data.len() >= 15 {
+            let ioa = u32::from_le_bytes([data[12], data[13], data[14], 0]);
+            let type_name = AsduTypeId::from_u8(asdu_type)
+                .map(|t| t.name().to_string())
+                .unwrap_or_else(|| format!("Type{}", asdu_type));
+            let ca = u16::from_le_bytes([data[10], data[11]]);
+
+            if let Some(ref lc) = log_collector {
+                let pn_str = if positive { "肯定" } else { "否定" };
+                let cot_str = match cot {
+                    7 => "激活确认",
+                    10 => "激活终止",
+                    _ => "未知",
+                };
+                lc.try_add(LogEntry::with_raw_bytes(
+                    Direction::Rx,
+                    FrameLabel::IFrame(type_name),
+                    format!("控制响应 IOA={} COT={}({}) P/N={} CA={}", ioa, cot, cot_str, pn_str, ca),
+                    data.to_vec(),
+                ));
+            }
+
+            let _ = control_tx.send(ControlResponse {
+                ioa,
+                asdu_type,
+                cot,
+                positive,
+            });
+        }
+        return;
+    }
     let ca = u16::from_le_bytes([data[10], data[11]]);
 
     if let Some(ref lc) = log_collector {
@@ -685,74 +968,102 @@ fn parse_and_store_asdu(
         lc.try_add(LogEntry::with_raw_bytes(
             Direction::Rx,
             FrameLabel::IFrame(type_name.clone()),
-            format!("{} CA={} n={} COT={}", type_name, ca, num_objects, cause),
+            format!("{} CA={} n={} COT={} SQ={}", type_name, ca, num_objects, cause, sq as u8),
             data.to_vec(),
         ));
     }
 
-    let mut obj_offset = 12;
-    for _ in 0..num_objects {
-        if obj_offset + 3 > data.len() { break; }
-        let ioa = u32::from_le_bytes([data[obj_offset], data[obj_offset + 1], data[obj_offset + 2], 0]);
-        obj_offset += 3;
+    let elem_size = match asdu_element_size(asdu_type) {
+        Some((base, has_ts)) => base + if has_ts { 7 } else { 0 },
+        None => return, // Unknown type, skip
+    };
 
-        let (value, bytes_consumed) = match asdu_type {
+    let mut obj_offset = 12;
+    let mut base_ioa: u32 = 0;
+    let asdu_id = AsduTypeId::from_u8(asdu_type).unwrap_or(AsduTypeId::MSpNa1);
+    let mut points = Vec::with_capacity(num_objects);
+
+    for i in 0..num_objects {
+        if sq {
+            if i == 0 {
+                if obj_offset + 3 > data.len() { break; }
+                base_ioa = u32::from_le_bytes([data[obj_offset], data[obj_offset + 1], data[obj_offset + 2], 0]);
+                obj_offset += 3;
+            }
+        } else {
+            if obj_offset + 3 > data.len() { break; }
+            base_ioa = u32::from_le_bytes([data[obj_offset], data[obj_offset + 1], data[obj_offset + 2], 0]);
+            obj_offset += 3;
+        }
+
+        let ioa = if sq { base_ioa + i as u32 } else { base_ioa };
+
+        if obj_offset + elem_size > data.len() { break; }
+
+        let value = match asdu_type {
             1 | 30 => {
-                if obj_offset >= data.len() { break; }
                 let siq = data[obj_offset];
-                let val = DataPointValue::SinglePoint { value: siq & 0x01 != 0 };
-                (val, 1 + if asdu_type == 30 { 7 } else { 0 })
+                DataPointValue::SinglePoint { value: siq & 0x01 != 0 }
             }
             3 | 31 => {
-                if obj_offset >= data.len() { break; }
                 let diq = data[obj_offset];
-                let val = DataPointValue::DoublePoint { value: diq & 0x03 };
-                (val, 1 + if asdu_type == 31 { 7 } else { 0 })
+                DataPointValue::DoublePoint { value: diq & 0x03 }
+            }
+            5 | 32 => {
+                let vti = data[obj_offset];
+                let value = (vti & 0x7F) as i8;
+                let transient = vti & 0x80 != 0;
+                DataPointValue::StepPosition { value, transient }
+            }
+            7 | 33 => {
+                let bsi = u32::from_le_bytes([
+                    data[obj_offset], data[obj_offset + 1],
+                    data[obj_offset + 2], data[obj_offset + 3],
+                ]);
+                DataPointValue::Bitstring { value: bsi }
             }
             9 | 34 => {
-                if obj_offset + 2 >= data.len() { break; }
                 let nva = i16::from_le_bytes([data[obj_offset], data[obj_offset + 1]]);
-                let val = DataPointValue::Normalized { value: nva as f32 / 32767.0 };
-                (val, 3 + if asdu_type == 34 { 7 } else { 0 })
+                DataPointValue::Normalized { value: nva as f32 / 32767.0 }
             }
             11 | 35 => {
-                if obj_offset + 2 >= data.len() { break; }
                 let sva = i16::from_le_bytes([data[obj_offset], data[obj_offset + 1]]);
-                let val = DataPointValue::Scaled { value: sva };
-                (val, 3 + if asdu_type == 35 { 7 } else { 0 })
+                DataPointValue::Scaled { value: sva }
             }
             13 | 36 => {
-                if obj_offset + 4 >= data.len() { break; }
                 let fval = f32::from_le_bytes([
                     data[obj_offset], data[obj_offset + 1],
                     data[obj_offset + 2], data[obj_offset + 3],
                 ]);
-                let val = DataPointValue::ShortFloat { value: fval };
-                (val, 5 + if asdu_type == 36 { 7 } else { 0 })
+                DataPointValue::ShortFloat { value: fval }
             }
             15 | 37 => {
-                if obj_offset + 4 >= data.len() { break; }
                 let counter = i32::from_le_bytes([
                     data[obj_offset], data[obj_offset + 1],
                     data[obj_offset + 2], data[obj_offset + 3],
                 ]);
-                let bcr = if obj_offset + 4 < data.len() { data[obj_offset + 4] } else { 0 };
+                let bcr = data[obj_offset + 4];
                 let carry = bcr & 0x20 != 0;
                 let sequence = bcr & 0x1F;
-                let val = DataPointValue::IntegratedTotal { value: counter, carry, sequence };
-                (val, 5 + if asdu_type == 37 { 7 } else { 0 })
+                DataPointValue::IntegratedTotal { value: counter, carry, sequence }
             }
-            _ => { break; }
+            _ => break,
         };
 
-        obj_offset += bytes_consumed;
+        obj_offset += elem_size;
+        points.push(DataPoint::with_value(ioa, asdu_id, value));
+    }
 
-        let asdu_id = AsduTypeId::from_u8(asdu_type).unwrap_or(AsduTypeId::MSpNa1);
-        let point = DataPoint::with_value(ioa, asdu_id, value);
-
+    // Batch insert — single lock acquisition for all points in this frame
+    if !points.is_empty() {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let rd = received_data.clone();
-            let _ = handle.block_on(async { rd.write().await.insert(point); });
+            let _ = handle.block_on(async {
+                let mut map = rd.write().await;
+                for point in points {
+                    map.insert(point);
+                }
+            });
         }
     }
 }
@@ -835,10 +1146,59 @@ fn build_double_command(ca: u16, ioa: u32, value: u8, select: bool) -> Vec<u8> {
     ]
 }
 
-fn build_setpoint_float_command(ca: u16, ioa: u32, value: f32) -> Vec<u8> {
+fn build_step_command(ca: u16, ioa: u32, value: u8, select: bool) -> Vec<u8> {
+    let ca_bytes = ca.to_le_bytes();
+    let ioa_bytes = ioa.to_le_bytes();
+    let mut rco = value & 0x03;
+    if select { rco |= 0x80; }
+    vec![
+        0x68, 0x0E,
+        0x00, 0x00, 0x00, 0x00,
+        47, 0x01, 6, 0x00,
+        ca_bytes[0], ca_bytes[1],
+        ioa_bytes[0], ioa_bytes[1], ioa_bytes[2],
+        rco,
+    ]
+}
+
+fn build_setpoint_normalized(ca: u16, ioa: u32, value: f32, select: bool) -> Vec<u8> {
+    let ca_bytes = ca.to_le_bytes();
+    let ioa_bytes = ioa.to_le_bytes();
+    let nva = (value * 32767.0) as i16;
+    let nva_bytes = nva.to_le_bytes();
+    let qos = if select { 0x80 } else { 0x00 };
+    vec![
+        0x68, 0x10,
+        0x00, 0x00, 0x00, 0x00,
+        48, 0x01, 6, 0x00,
+        ca_bytes[0], ca_bytes[1],
+        ioa_bytes[0], ioa_bytes[1], ioa_bytes[2],
+        nva_bytes[0], nva_bytes[1],
+        qos,
+    ]
+}
+
+fn build_setpoint_scaled(ca: u16, ioa: u32, value: i16, select: bool) -> Vec<u8> {
+    let ca_bytes = ca.to_le_bytes();
+    let ioa_bytes = ioa.to_le_bytes();
+    let sva_bytes = value.to_le_bytes();
+    let qos = if select { 0x80 } else { 0x00 };
+    vec![
+        0x68, 0x10,
+        0x00, 0x00, 0x00, 0x00,
+        49, 0x01, 6, 0x00,
+        ca_bytes[0], ca_bytes[1],
+        ioa_bytes[0], ioa_bytes[1], ioa_bytes[2],
+        sva_bytes[0], sva_bytes[1],
+        qos,
+    ]
+}
+
+fn build_setpoint_float_command(ca: u16, ioa: u32, value: f32, select: bool) -> Vec<u8> {
     let ca_bytes = ca.to_le_bytes();
     let ioa_bytes = ioa.to_le_bytes();
     let val_bytes = value.to_le_bytes();
+    let qos = if select { 0x80 } else { 0x00 };
     vec![
         0x68, 0x12,
         0x00, 0x00, 0x00, 0x00,
@@ -846,7 +1206,7 @@ fn build_setpoint_float_command(ca: u16, ioa: u32, value: f32) -> Vec<u8> {
         ca_bytes[0], ca_bytes[1],
         ioa_bytes[0], ioa_bytes[1], ioa_bytes[2],
         val_bytes[0], val_bytes[1], val_bytes[2], val_bytes[3],
-        0x00,
+        qos,
     ]
 }
 
@@ -900,5 +1260,68 @@ mod tests {
         assert_eq!(frame[6], 45);
         assert_eq!(frame[12], 100);
         assert_eq!(frame[15], 0x01);
+    }
+
+    #[test]
+    fn test_build_step_command() {
+        // Lower, Execute
+        let frame = build_step_command(1, 600, 1, false);
+        assert_eq!(frame[0], 0x68);
+        assert_eq!(frame[6], 47); // Type 47
+        assert_eq!(frame[12], 600u32.to_le_bytes()[0]);
+        assert_eq!(frame[15], 0x01); // RCO = lower, no select
+
+        // Higher, Select
+        let frame = build_step_command(1, 600, 2, true);
+        assert_eq!(frame[15], 0x82); // RCO = higher + select bit
+    }
+
+    #[test]
+    fn test_build_setpoint_normalized() {
+        let frame = build_setpoint_normalized(1, 400, 0.5, false);
+        assert_eq!(frame[0], 0x68);
+        assert_eq!(frame[6], 48); // Type 48
+        let nva = i16::from_le_bytes([frame[15], frame[16]]);
+        assert_eq!(nva, (0.5_f32 * 32767.0) as i16);
+        assert_eq!(frame[17], 0x00); // QOS = no select
+
+        // With select
+        let frame = build_setpoint_normalized(1, 400, -0.5, true);
+        assert_eq!(frame[17], 0x80); // QOS = select bit
+    }
+
+    #[test]
+    fn test_build_setpoint_scaled() {
+        let frame = build_setpoint_scaled(1, 500, 1024, false);
+        assert_eq!(frame[0], 0x68);
+        assert_eq!(frame[6], 49); // Type 49
+        let sva = i16::from_le_bytes([frame[15], frame[16]]);
+        assert_eq!(sva, 1024);
+        assert_eq!(frame[17], 0x00); // QOS = no select
+    }
+
+    #[test]
+    fn test_build_setpoint_float_with_select() {
+        let frame = build_setpoint_float_command(1, 300, 25.5, true);
+        assert_eq!(frame[6], 50); // Type 50
+        let val = f32::from_le_bytes([frame[15], frame[16], frame[17], frame[18]]);
+        assert!((val - 25.5).abs() < 0.001);
+        assert_eq!(frame[19], 0x80); // QOS = select bit
+
+        let frame = build_setpoint_float_command(1, 300, 25.5, false);
+        assert_eq!(frame[19], 0x00); // QOS = no select
+    }
+
+    #[test]
+    fn test_asdu_type_step_command() {
+        assert_eq!(AsduTypeId::from_u8(47), Some(AsduTypeId::CRcNa1));
+        assert_eq!(AsduTypeId::CRcNa1.name(), "C_RC_NA_1");
+        assert_eq!(AsduTypeId::CRcNa1.description(), "步调节命令");
+        assert_eq!(AsduTypeId::CRcNa1.category(), crate::types::DataCategory::StepPosition);
+    }
+
+    #[test]
+    fn test_frame_label_step_command() {
+        assert_eq!(FrameLabel::StepCommand.name(), "C_RC");
     }
 }

@@ -44,12 +44,16 @@ pub enum FrameLabel {
     GeneralInterrogation,
     /// Counter interrogation
     CounterRead,
+    /// Counter interrogation (activation)
+    CounterInterrogation,
     /// Clock synchronization
     ClockSync,
     /// Single command
     SingleCommand,
     /// Double command
     DoubleCommand,
+    /// Step command
+    StepCommand,
     /// Setpoint normalized
     SetpointNormalized,
     /// Setpoint scaled
@@ -73,9 +77,11 @@ impl FrameLabel {
             Self::UTestCon => "U TESTFR CON".to_string(),
             Self::GeneralInterrogation => "GI".to_string(),
             Self::CounterRead => "CI".to_string(),
+            Self::CounterInterrogation => "C_CI".to_string(),
             Self::ClockSync => "CS".to_string(),
             Self::SingleCommand => "C_SC".to_string(),
             Self::DoubleCommand => "C_DC".to_string(),
+            Self::StepCommand => "C_RC".to_string(),
             Self::SetpointNormalized => "C_SE_NA".to_string(),
             Self::SetpointScaled => "C_SE_NB".to_string(),
             Self::SetpointFloat => "C_SE_NC".to_string(),

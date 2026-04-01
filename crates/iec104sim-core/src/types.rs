@@ -43,6 +43,8 @@ pub enum AsduTypeId {
     CScNa1 = 45,
     /// Double command (Type 46)
     CDcNa1 = 46,
+    /// Step command (Type 47)
+    CRcNa1 = 47,
     /// Set-point, normalized (Type 48)
     CSeNa1 = 48,
     /// Set-point, scaled (Type 49)
@@ -81,6 +83,7 @@ impl AsduTypeId {
             Self::MItTb1 => "M_IT_TB_1",
             Self::CScNa1 => "C_SC_NA_1",
             Self::CDcNa1 => "C_DC_NA_1",
+            Self::CRcNa1 => "C_RC_NA_1",
             Self::CSeNa1 => "C_SE_NA_1",
             Self::CSeNb1 => "C_SE_NB_1",
             Self::CSeNc1 => "C_SE_NC_1",
@@ -103,6 +106,7 @@ impl AsduTypeId {
             Self::MItNa1 | Self::MItTb1 => "累计量",
             Self::CScNa1 => "单点命令",
             Self::CDcNa1 => "双点命令",
+            Self::CRcNa1 => "步调节命令",
             Self::CSeNa1 => "归一化设定值",
             Self::CSeNb1 => "标度化设定值",
             Self::CSeNc1 => "短浮点设定值",
@@ -125,6 +129,7 @@ impl AsduTypeId {
             Self::MItNa1 | Self::MItTb1 => DataCategory::IntegratedTotals,
             Self::CScNa1 => DataCategory::SinglePoint,
             Self::CDcNa1 => DataCategory::DoublePoint,
+            Self::CRcNa1 => DataCategory::StepPosition,
             Self::CSeNa1 => DataCategory::NormalizedMeasured,
             Self::CSeNb1 => DataCategory::ScaledMeasured,
             Self::CSeNc1 => DataCategory::FloatMeasured,
@@ -153,6 +158,7 @@ impl AsduTypeId {
             37 => Some(Self::MItTb1),
             45 => Some(Self::CScNa1),
             46 => Some(Self::CDcNa1),
+            47 => Some(Self::CRcNa1),
             48 => Some(Self::CSeNa1),
             49 => Some(Self::CSeNb1),
             50 => Some(Self::CSeNc1),

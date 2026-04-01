@@ -3,7 +3,8 @@ import { inject, computed, ref, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { dialogKey } from '../composables/useDialog'
 import type { showAlert as ShowAlert } from '../composables/useDialog'
-import type { ReceivedDataPointInfo } from '../types'
+import type { ReceivedDataPointInfo, ControlResult, CommandType } from '../types'
+import { getControlConfig } from '../types'
 
 const { showAlert } = inject<{ showAlert: typeof ShowAlert }>(dialogKey)!
 const selectedConnectionId = inject<Ref<string | null>>('selectedConnectionId')!
@@ -12,51 +13,90 @@ const selectedPoints = inject<Ref<ReceivedDataPointInfo[]>>('selectedPoints')!
 const hasSelection = computed(() => selectedPoints.value.length > 0)
 const firstPoint = computed(() => selectedPoints.value[0] ?? null)
 
-// Control command form
-const cmdType = ref<'single' | 'double' | 'setpoint_float'>('single')
-const cmdValue = ref('')
+// Control state
 const cmdSelect = ref(false)
-const cmdIoa = ref<number>(0)
+const sending = ref(false)
+const lastResult = ref<{ success: boolean; result?: ControlResult; error?: string } | null>(null)
 
-// Auto-fill IOA from selection
-const controlIoa = computed(() => {
-  if (firstPoint.value) return firstPoint.value.ioa
-  return cmdIoa.value
+// Setpoint input values
+const setpointValue = ref('')
+
+// Auto-detect control config from selected point's category
+const controlConfig = computed(() => {
+  if (!firstPoint.value) return null
+  return getControlConfig(firstPoint.value.category)
 })
 
-async function sendCommand() {
-  if (!selectedConnectionId.value) return
-  const ioa = controlIoa.value
+// Get current value string for highlighting active state
+const currentValue = computed(() => firstPoint.value?.value ?? '')
+
+async function getCommonAddress(): Promise<number> {
+  const conns = await invoke<any[]>('list_connections')
+  const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
+  return conn?.common_address ?? 1
+}
+
+async function sendCommand(value: string) {
+  if (!selectedConnectionId.value || !firstPoint.value || !controlConfig.value) return
+  sending.value = true
+  lastResult.value = null
 
   try {
-    // Fetch common address for this connection
-    const conns = await invoke<any[]>('list_connections')
-    const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
-    const ca = conn?.common_address ?? 1
-
-    await invoke('send_control_command', {
+    const ca = await getCommonAddress()
+    const result = await invoke<ControlResult>('send_control_command', {
       request: {
         connection_id: selectedConnectionId.value,
-        ioa: ioa,
+        ioa: firstPoint.value.ioa,
         common_address: ca,
-        command_type: cmdType.value,
-        value: cmdValue.value,
+        command_type: controlConfig.value.commandType,
+        value: value,
         select: cmdSelect.value,
       }
     })
+    lastResult.value = { success: true, result }
   } catch (e) {
-    await showAlert(String(e))
+    lastResult.value = { success: false, error: String(e) }
+  } finally {
+    sending.value = false
   }
 }
 
-function cmdTypeLabel(t: string): string {
-  const map: Record<string, string> = {
-    single: 'C_SC_NA_1',
-    double: 'C_DC_NA_1',
-    setpoint_float: 'C_SE_NC_1',
-  }
-  return map[t] || t
+function sendSetpoint() {
+  sendCommand(setpointValue.value)
 }
+
+// Determine if an option matches the current value
+function isActiveOption(optionValue: string): boolean {
+  const cv = currentValue.value.toLowerCase()
+  // single point
+  if (optionValue === 'true') return cv === 'on'
+  if (optionValue === 'false') return cv === 'off'
+  // double point
+  if (optionValue === '0') return cv === '中间'
+  if (optionValue === '1') return cv === 'off'
+  if (optionValue === '2') return cv === 'on'
+  if (optionValue === '3') return cv === '不确定'
+  return false
+}
+
+// Parse numeric value from current point for setpoint prefill
+const numericValue = computed(() => {
+  if (!firstPoint.value) return 0
+  const v = parseFloat(firstPoint.value.value)
+  return isNaN(v) ? 0 : v
+})
+
+// Prefill setpoint when point changes
+import { watch } from 'vue'
+watch(firstPoint, (p) => {
+  if (p && controlConfig.value) {
+    const w = controlConfig.value.widget
+    if (w === 'slider' || w === 'number_input') {
+      setpointValue.value = String(numericValue.value)
+    }
+  }
+  lastResult.value = null
+})
 </script>
 
 <template>
@@ -102,59 +142,130 @@ function cmdTypeLabel(t: string): string {
         </div>
       </div>
 
-      <!-- Control command section -->
-      <div class="control-section">
-        <div class="section-title">控制命令</div>
+      <!-- Smart control section -->
+      <div v-if="controlConfig" class="control-section">
+        <div class="section-title">快捷控制 - {{ controlConfig.label }}</div>
 
         <div class="control-form">
-          <label class="form-label">
-            IOA
+          <!-- Toggle (single point) -->
+          <div v-if="controlConfig.widget === 'toggle'" class="toggle-buttons">
+            <button
+              v-for="opt in controlConfig.options"
+              :key="opt.value"
+              :class="['ctrl-btn', { active: isActiveOption(opt.value) }]"
+              :disabled="sending || !selectedConnectionId"
+              @click="sendCommand(opt.value)"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+
+          <!-- Button group (double point) -->
+          <div v-else-if="controlConfig.widget === 'button_group'" class="button-group">
+            <button
+              v-for="opt in controlConfig.options"
+              :key="opt.value"
+              :class="['ctrl-btn', 'ctrl-btn-sm', { active: isActiveOption(opt.value) }]"
+              :disabled="sending || !selectedConnectionId"
+              @click="sendCommand(opt.value)"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+
+          <!-- Step buttons -->
+          <div v-else-if="controlConfig.widget === 'step_buttons'" class="step-buttons">
+            <button
+              v-for="opt in controlConfig.options"
+              :key="opt.value"
+              class="ctrl-btn"
+              :disabled="sending || !selectedConnectionId"
+              @click="sendCommand(opt.value)"
+            >
+              {{ opt.value === '1' ? '&#9660;' : '&#9650;' }} {{ opt.label }}
+            </button>
+          </div>
+
+          <!-- Slider (normalized) -->
+          <div v-else-if="controlConfig.widget === 'slider'" class="slider-control">
+            <div class="slider-row">
+              <input
+                type="range"
+                class="slider-input"
+                :min="controlConfig.min"
+                :max="controlConfig.max"
+                :step="controlConfig.step"
+                v-model="setpointValue"
+              />
+              <input
+                type="number"
+                class="number-sm"
+                :min="controlConfig.min"
+                :max="controlConfig.max"
+                :step="controlConfig.step"
+                v-model="setpointValue"
+              />
+            </div>
+            <button
+              class="ctrl-btn ctrl-btn-primary"
+              :disabled="sending || !selectedConnectionId"
+              @click="sendSetpoint"
+            >
+              发送设定值
+            </button>
+          </div>
+
+          <!-- Number input (scaled / float) -->
+          <div v-else-if="controlConfig.widget === 'number_input'" class="number-control">
             <input
-              v-model.number="cmdIoa"
-              class="form-input"
               type="number"
-              min="0"
-              :placeholder="String(controlIoa)"
-              :value="controlIoa"
-              @input="cmdIoa = Number(($event.target as HTMLInputElement).value)"
-            />
-          </label>
-
-          <label class="form-label">
-            命令类型
-            <select v-model="cmdType" class="form-input">
-              <option value="single">单点命令 (C_SC_NA_1)</option>
-              <option value="double">双点命令 (C_DC_NA_1)</option>
-              <option value="setpoint_float">浮点设定值 (C_SE_NC_1)</option>
-            </select>
-          </label>
-
-          <label class="form-label">
-            值
-            <input
-              v-model="cmdValue"
               class="form-input"
-              type="text"
-              :placeholder="cmdType === 'single' ? '0 或 1' : cmdType === 'double' ? '0-3' : '0.0'"
+              :min="controlConfig.min"
+              :max="controlConfig.max"
+              :step="controlConfig.step"
+              v-model="setpointValue"
+              @keydown.enter="sendSetpoint"
             />
-          </label>
+            <button
+              class="ctrl-btn ctrl-btn-primary"
+              :disabled="sending || !selectedConnectionId"
+              @click="sendSetpoint"
+            >
+              发送设定值
+            </button>
+          </div>
 
+          <!-- Select/Execute mode -->
           <div class="toggle-row">
             <label class="toggle-label">
               <input type="checkbox" v-model="cmdSelect" class="toggle-checkbox" />
-              <span>选择/执行</span>
+              <span>选择-执行 (SbO)</span>
             </label>
-            <span class="toggle-hint">{{ cmdSelect ? '选择 (Select)' : '执行 (Execute)' }}</span>
+            <span class="toggle-hint">{{ cmdSelect ? '自动两步' : '直接执行' }}</span>
           </div>
 
-          <button
-            class="btn btn-primary send-btn"
-            :disabled="!selectedConnectionId"
-            @click="sendCommand"
-          >
-            发送 {{ cmdTypeLabel(cmdType) }}
-          </button>
+          <!-- Control result indicator -->
+          <div v-if="lastResult" :class="['result-indicator', lastResult.success ? 'result-ok' : 'result-err']">
+            <template v-if="lastResult.success && lastResult.result">
+              <div class="result-steps">
+                <span
+                  v-for="(step, i) in lastResult.result.steps"
+                  :key="i"
+                  class="step-dot"
+                  :title="step.action + ' ' + step.timestamp"
+                >&#9679;</span>
+              </div>
+              <span class="result-text">OK {{ lastResult.result.duration_ms }}ms</span>
+            </template>
+            <template v-else>
+              <span class="result-text">{{ lastResult.error }}</span>
+            </template>
+          </div>
         </div>
+      </div>
+
+      <div v-else-if="firstPoint" class="no-control-hint">
+        此类型不支持控制操作
       </div>
     </template>
   </div>
@@ -244,12 +355,99 @@ function cmdTypeLabel(t: string): string {
   gap: 10px;
 }
 
-.form-label {
+.toggle-buttons,
+.button-group,
+.step-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.button-group {
+  flex-wrap: wrap;
+}
+
+.ctrl-btn {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  background: #313244;
+  color: #cdd6f4;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ctrl-btn:hover:not(:disabled) {
+  background: #45475a;
+}
+
+.ctrl-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ctrl-btn.active {
+  background: #89b4fa;
+  color: #1e1e2e;
+  border-color: #89b4fa;
+  font-weight: 600;
+}
+
+.ctrl-btn-sm {
+  padding: 6px 8px;
+  font-size: 11px;
+}
+
+.ctrl-btn-primary {
+  background: #89b4fa;
+  color: #1e1e2e;
+  border-color: #89b4fa;
+  font-weight: 600;
+}
+
+.ctrl-btn-primary:hover:not(:disabled) {
+  background: #74c7ec;
+  border-color: #74c7ec;
+}
+
+.slider-control {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 11px;
-  color: #6c7086;
+  gap: 8px;
+}
+
+.slider-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.slider-input {
+  flex: 1;
+  accent-color: #89b4fa;
+}
+
+.number-sm {
+  width: 72px;
+  padding: 4px 6px;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  color: #cdd6f4;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.number-sm:focus {
+  outline: none;
+  border-color: #89b4fa;
+}
+
+.number-control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .form-input {
@@ -291,31 +489,46 @@ function cmdTypeLabel(t: string): string {
   color: #6c7086;
 }
 
-.send-btn {
-  margin-top: 4px;
+.result-indicator {
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.btn {
-  padding: 7px 16px;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
+.result-ok {
+  background: rgba(166, 227, 161, 0.15);
+  border: 1px solid rgba(166, 227, 161, 0.3);
+  color: #a6e3a1;
+}
+
+.result-err {
+  background: rgba(243, 139, 168, 0.15);
+  border: 1px solid rgba(243, 139, 168, 0.3);
+  color: #f38ba8;
+}
+
+.result-steps {
+  display: flex;
+  gap: 4px;
+  font-size: 8px;
+}
+
+.step-dot {
+  color: #a6e3a1;
+}
+
+.result-text {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.no-control-hint {
+  padding: 16px 12px;
+  color: #6c7086;
   text-align: center;
-}
-
-.btn-primary {
-  background: #89b4fa;
-  color: #1e1e2e;
-  font-weight: 600;
-}
-
-.btn-primary:hover {
-  background: #74c7ec;
-}
-
-.btn-primary:disabled {
-  opacity: 0.4;
-  cursor: default;
+  font-size: 12px;
+  font-style: italic;
 }
 </style>

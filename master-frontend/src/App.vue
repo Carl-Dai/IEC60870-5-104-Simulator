@@ -41,6 +41,14 @@ function refreshData() {
 }
 provide('refreshData', refreshData)
 
+// Changed categories for tree flash effect
+const changedCategories = ref<Set<string>>(new Set())
+provide('changedCategories', changedCategories)
+
+// Realtime category counts derived from DataTable's dataMap
+const categoryCounts = ref<Map<string, number>>(new Map())
+provide('categoryCounts', categoryCounts)
+
 provide(dialogKey, { showAlert, showConfirm, showPrompt })
 
 // Listen for backend connection state events
@@ -61,16 +69,20 @@ onUnmounted(() => {
 })
 
 function handleConnectionSelect(id: string, state: string) {
+  const changed = selectedConnectionId.value !== id
   selectedConnectionId.value = id
   selectedConnectionState.value = state
-  selectedCategory.value = null
-  selectedPoints.value = []
+  // Only clear category when switching to a different connection
+  if (changed) {
+    selectedCategory.value = null
+    selectedPoints.value = []
+  }
 }
 
 function handleCategorySelect(connectionId: string, category: string) {
   selectedConnectionId.value = connectionId
+  selectedConnectionState.value = selectedConnectionState.value // preserve
   selectedCategory.value = category
-  selectedPoints.value = []
 }
 
 function handlePointSelect(points: ReceivedDataPointInfo[]) {

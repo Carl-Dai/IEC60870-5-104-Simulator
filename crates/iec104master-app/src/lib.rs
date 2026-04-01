@@ -21,6 +21,7 @@ pub fn run() {
             commands::send_control_command,
             // Data commands
             commands::get_received_data,
+            commands::get_received_data_since,
             // Log commands
             commands::get_communication_logs,
             commands::clear_communication_logs,
