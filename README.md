@@ -1,8 +1,16 @@
 # IEC 60870-5-104 Simulator
 
+[![GitHub Release](https://img.shields.io/github/v/release/kelsoprotein-lab/IEC104Sim)](https://github.com/kelsoprotein-lab/IEC104Sim/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)]()
+
 [中文版](README_CN.md)
 
-A cross-platform IEC 60870-5-104 protocol simulate built with **Rust** + **Tauri** + **Vue 3**, featuring both a Slave (server) and Master (client) application.
+A cross-platform IEC 60870-5-104 protocol simulator built with **Rust** + **Tauri 2** + **Vue 3**, featuring both a Slave (server) and Master (client) application.
+
+## Download
+
+Pre-built installers for Windows, macOS, and Linux are available on the [Releases](https://github.com/kelsoprotein-lab/IEC104Sim/releases) page.
 
 ## Features
 

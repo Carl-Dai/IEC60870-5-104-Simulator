@@ -1,8 +1,16 @@
 # IEC 60870-5-104 Simulator
 
+[![GitHub Release](https://img.shields.io/github/v/release/kelsoprotein-lab/IEC104Sim)](https://github.com/kelsoprotein-lab/IEC104Sim/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)]()
+
 [English](README.md)
 
-基于 **Rust** + **Tauri** + **Vue 3** 构建的跨平台 IEC 60870-5-104 协议仿真工具，包含从站（Slave）和主站（Master）两个独立应用。
+基于 **Rust** + **Tauri 2** + **Vue 3** 构建的跨平台 IEC 60870-5-104 协议仿真工具，包含从站（Slave）和主站（Master）两个独立应用。
+
+## 下载安装
+
+Windows、macOS 和 Linux 平台的安装包可在 [Releases](https://github.com/kelsoprotein-lab/IEC104Sim/releases) 页面下载。
 
 ## 功能特性
 
