@@ -1,7 +1,7 @@
 /// Parse a hex string (e.g. "68 04 07 00") into bytes.
 pub fn parse_hex_string(s: &str) -> Result<Vec<u8>, ToolError> {
     let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err(ToolError::InvalidHexLength);
     }
     (0..cleaned.len())

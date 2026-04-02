@@ -206,6 +206,12 @@ impl SeqNumbers {
     }
 }
 
+impl Default for SeqNumbers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// An IEC 104 master connection.
 pub struct MasterConnection {
     pub config: MasterConfig,
@@ -1072,7 +1078,7 @@ fn parse_and_store_asdu(
     if !points.is_empty() {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let rd = received_data.clone();
-            let _ = handle.block_on(async {
+            handle.block_on(async {
                 let mut map = rd.write().await;
                 for point in points {
                     map.insert(point);

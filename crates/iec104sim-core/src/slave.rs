@@ -56,6 +56,7 @@ impl Default for CyclicConfig {
 // Stream Abstraction (for blocking TLS path)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 enum SlaveStream {
     Plain(TcpStream),
     Tls(native_tls::TlsStream<TcpStream>),
@@ -244,6 +245,7 @@ struct ConnectionWrite {
     /// Last sent value string per IOA.
     last_sent: HashMap<u32, String>,
     /// Logger.
+    #[allow(dead_code)]
     log_collector: Option<Arc<LogCollector>>,
 }
 
@@ -498,7 +500,7 @@ impl SlaveServer {
                                         format!("TLS 握手成功: {}", peer_str),
                                     ));
                                 }
-                                handleClientBlocking(&mut tls_stream, stations, lc, flag, tls_queue, tls_connections, peer_addr);
+                                handle_client_blocking(&mut tls_stream, stations, lc, flag, tls_queue, tls_connections, peer_addr);
                             });
                         } else {
                             // Plain TCP: async with queue-based cyclic writes.
@@ -551,7 +553,7 @@ impl SlaveServer {
 
                             // Spawn read task (owns ReadHalf + queue for enqueueing responses).
                             tokio::spawn(async move {
-                                handleClientReadLoop(rh, stations_for_reader, lc_for_reader, flag, connections, queue_for_reader, addr_for_read).await;
+                                handle_client_read_loop(rh, stations_for_reader, lc_for_reader, flag, connections, queue_for_reader, addr_for_read).await;
                             });
                         }
                     }
@@ -599,7 +601,7 @@ type SharedQueue = Arc<tokio::sync::Mutex<Vec<u8>>>;
 // Async Client Read Loop
 // ---------------------------------------------------------------------------
 
-async fn handleClientReadLoop(
+async fn handle_client_read_loop(
     mut stream: tokio::io::ReadHalf<AsyncTcpStream>,
     stations: SharedStations,
     log_collector: Option<Arc<LogCollector>>,
@@ -1013,7 +1015,7 @@ async fn handleClientReadLoop(
 // Blocking Client Handler (for TLS)
 // ---------------------------------------------------------------------------
 
-fn handleClientBlocking(
+fn handle_client_blocking(
     stream: &mut native_tls::TlsStream<TcpStream>,
     stations: SharedStations,
     log_collector: Option<Arc<LogCollector>>,
@@ -1117,7 +1119,7 @@ fn handleClientBlocking(
                                             format!("GI 激活确认 CA={}", ca),
                                         ));
                                     }
-                                    sendGiResponseBlocking(stream, station);
+                                    send_gi_response_blocking(stream, station);
                                 }
                                 drop(stations_read);
                                 let mut term = data[..n].to_vec(); term[8] = 10;
@@ -1501,7 +1503,7 @@ fn handleClientBlocking(
     }
 }
 
-fn sendGiResponseBlocking(
+fn send_gi_response_blocking(
     stream: &mut native_tls::TlsStream<TcpStream>,
     station: &Station,
 ) {
