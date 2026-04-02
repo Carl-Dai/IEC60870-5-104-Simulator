@@ -45,9 +45,14 @@ mod cert_gen {
         pub ca_cert: PathBuf,
         pub server_cert: PathBuf,
         pub server_key: PathBuf,
+        pub server_pkcs12: PathBuf,
         pub client_cert: PathBuf,
         pub client_key: PathBuf,
+        pub client_pkcs12: PathBuf,
     }
+
+    /// PKCS#12 password used for all generated identities in tests.
+    pub const PKCS12_PASS: &str = "iec104test";
 
     /// Generate a full certificate chain: CA -> Server + Client.
     pub fn generate() -> TestCerts {
@@ -94,21 +99,49 @@ mod cert_gen {
         }
     }
 
-    /// Write all PEM files to the given directory, return paths.
+    /// Write all PEM files to the given directory and generate PKCS#12 bundles.
     pub fn write_to_dir(certs: &TestCerts, dir: &Path) -> CertPaths {
         let paths = CertPaths {
             ca_cert: dir.join("ca.pem"),
             server_cert: dir.join("server.pem"),
             server_key: dir.join("server-key.pem"),
+            server_pkcs12: dir.join("server.p12"),
             client_cert: dir.join("client.pem"),
             client_key: dir.join("client-key.pem"),
+            client_pkcs12: dir.join("client.p12"),
         };
         std::fs::write(&paths.ca_cert, &certs.ca_cert_pem).unwrap();
         std::fs::write(&paths.server_cert, &certs.server_cert_pem).unwrap();
         std::fs::write(&paths.server_key, &certs.server_key_pem).unwrap();
         std::fs::write(&paths.client_cert, &certs.client_cert_pem).unwrap();
         std::fs::write(&paths.client_key, &certs.client_key_pem).unwrap();
+
+        // Generate PKCS#12 bundles via openssl CLI (required on macOS with native-tls
+        // because the Security framework cannot import ECDSA keys via from_pkcs8).
+        make_pkcs12(
+            &paths.server_cert, &paths.server_key, &paths.server_pkcs12, PKCS12_PASS,
+        );
+        make_pkcs12(
+            &paths.client_cert, &paths.client_key, &paths.client_pkcs12, PKCS12_PASS,
+        );
+
         paths
+    }
+
+    fn make_pkcs12(cert: &Path, key: &Path, out: &Path, password: &str) {
+        // Try without -legacy first (modern PKCS#12, compatible with macOS Security framework).
+        // OpenSSL 3.x defaults to AES-256-CBC which macOS Security.framework supports.
+        let status = std::process::Command::new("openssl")
+            .args([
+                "pkcs12", "-export",
+                "-in",      cert.to_str().unwrap(),
+                "-inkey",   key.to_str().unwrap(),
+                "-out",     out.to_str().unwrap(),
+                "-passout", &format!("pass:{}", password),
+            ])
+            .status()
+            .expect("openssl not found — required for PKCS#12 generation");
+        assert!(status.success(), "openssl pkcs12 export failed");
     }
 }
 
@@ -130,8 +163,10 @@ fn test_cert_generation() {
     assert!(paths.ca_cert.exists());
     assert!(paths.server_cert.exists());
     assert!(paths.server_key.exists());
+    assert!(paths.server_pkcs12.exists());
     assert!(paths.client_cert.exists());
     assert!(paths.client_key.exists());
+    assert!(paths.client_pkcs12.exists());
 }
 
 // =========================================================================
@@ -236,4 +271,75 @@ mod capture {
 
         eprintln!("  TLS assertions passed. pcap: {}", pcap);
     }
+}
+
+// =========================================================================
+// Test: One-way TLS handshake (server auth only)
+// =========================================================================
+// multi_thread flavor needed: master.connect() does blocking TLS I/O inside
+// the async context; without extra threads the slave's async accept() loop
+// would be starved and the handshake would time out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_tls_handshake_one_way() {
+    if !check_tools_available() { return; }
+
+    let port = free_port();
+    let certs = cert_gen::generate();
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = cert_gen::write_to_dir(&certs, tmp.path());
+
+    // Start slave with TLS enabled, no client cert required.
+    // Use PKCS#12 for identity — native-tls on macOS cannot import ECDSA keys
+    // via from_pkcs8 (Security framework limitation).
+    let transport = SlaveTransportConfig {
+        bind_address: "127.0.0.1".to_string(),
+        port,
+        tls: SlaveTlsConfig {
+            enabled: true,
+            cert_file: String::new(),
+            key_file: String::new(),
+            ca_file: String::new(),
+            require_client_cert: false,
+            pkcs12_file: paths.server_pkcs12.to_str().unwrap().to_string(),
+            pkcs12_password: cert_gen::PKCS12_PASS.to_string(),
+        },
+    };
+    let mut slave = SlaveServer::new(transport);
+    slave.add_station(Station::with_default_points(1, "TLS Test", 2)).await.unwrap();
+    slave.start().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+
+    // Start packet capture
+    let mut cap = capture::start("tls_handshake_one_way", port)
+        .expect("failed to start capture");
+    sleep(Duration::from_millis(500)).await;
+
+    // Connect master with TLS, trusting our CA
+    let config = MasterConfig {
+        target_address: "127.0.0.1".to_string(),
+        port,
+        common_address: 1,
+        tls: TlsConfig {
+            enabled: true,
+            ca_file: paths.ca_cert.to_str().unwrap().to_string(),
+            cert_file: String::new(),
+            key_file: String::new(),
+            accept_invalid_certs: false,
+        },
+        ..Default::default()
+    };
+    let mut master = MasterConnection::new(config);
+    let connect_result = master.connect().await;
+    assert!(connect_result.is_ok(), "TLS connection should succeed: {:?}", connect_result.err());
+    sleep(Duration::from_millis(500)).await;
+
+    // Disconnect and stop capture
+    master.disconnect().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+    slave.stop().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+    cap.stop().expect("failed to stop capture");
+
+    // Protocol assertions
+    capture::assert_tls_encrypted(&cap.pcap_path, port);
 }

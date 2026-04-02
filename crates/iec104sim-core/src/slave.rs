@@ -25,6 +25,14 @@ pub struct SlaveTlsConfig {
     pub ca_file: String,
     #[serde(default)]
     pub require_client_cert: bool,
+    /// Optional PKCS#12 (.p12/.pfx) identity file. When set, cert_file and
+    /// key_file are ignored for identity loading. Required on macOS when using
+    /// ECDSA keys (native-tls / Security framework limitation).
+    #[serde(default)]
+    pub pkcs12_file: String,
+    /// Password for the PKCS#12 file (may be empty string).
+    #[serde(default)]
+    pub pkcs12_password: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -337,10 +345,19 @@ impl SlaveServer {
 
         let tls_acceptor: Option<Arc<native_tls::TlsAcceptor>> = if self.transport.tls.enabled {
             let cfg = &self.transport.tls;
-            let cert = std::fs::read(&cfg.cert_file).map_err(|e| SlaveError::TlsError(format!("读取证书 {}: {}", cfg.cert_file, e)))?;
-            let key = std::fs::read(&cfg.key_file).map_err(|e| SlaveError::TlsError(format!("读取密钥 {}: {}", cfg.key_file, e)))?;
-            let identity = native_tls::Identity::from_pkcs8(&cert, &key)
-                .map_err(|e| SlaveError::TlsError(format!("加载身份: {}", e)))?;
+            let identity = if !cfg.pkcs12_file.is_empty() {
+                let p12 = std::fs::read(&cfg.pkcs12_file)
+                    .map_err(|e| SlaveError::TlsError(format!("读取 PKCS12 {}: {}", cfg.pkcs12_file, e)))?;
+                native_tls::Identity::from_pkcs12(&p12, &cfg.pkcs12_password)
+                    .map_err(|e| SlaveError::TlsError(format!("加载 PKCS12 身份: {}", e)))?
+            } else {
+                let cert = std::fs::read(&cfg.cert_file)
+                    .map_err(|e| SlaveError::TlsError(format!("读取证书 {}: {}", cfg.cert_file, e)))?;
+                let key = std::fs::read(&cfg.key_file)
+                    .map_err(|e| SlaveError::TlsError(format!("读取密钥 {}: {}", cfg.key_file, e)))?;
+                native_tls::Identity::from_pkcs8(&cert, &key)
+                    .map_err(|e| SlaveError::TlsError(format!("加载身份: {}", e)))?
+            };
             let mut builder = native_tls::TlsAcceptor::builder(identity);
             builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
             Some(Arc::new(builder.build().map_err(|e| SlaveError::TlsError(format!("创建接受器: {}", e)))?))
@@ -444,6 +461,9 @@ impl SlaveServer {
                             // TLS: blocking I/O via spawn_blocking.
                             tokio::task::spawn_blocking(move || {
                                 let tcp_stream = stream.into_std().expect("into_std");
+                                // into_std() preserves tokio's non-blocking mode; switch to
+                                // blocking so native-tls can perform synchronous handshake I/O.
+                                tcp_stream.set_nonblocking(false).expect("set_nonblocking(false)");
                                 let acceptor = tls_acceptor.as_ref().unwrap();
                                 let mut tls_stream = match acceptor.accept(tcp_stream) {
                                     Ok(s) => s,
