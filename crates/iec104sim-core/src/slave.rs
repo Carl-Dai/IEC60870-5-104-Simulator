@@ -459,6 +459,16 @@ impl SlaveServer {
 
                         if tls_acceptor.is_some() {
                             // TLS: blocking I/O via spawn_blocking.
+                            // Create a shared queue so queue_spontaneous() can enqueue frames
+                            // that the blocking loop drains to the TLS stream.
+                            let tls_queue: SharedQueue = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+                            connections.write().await.insert(peer_addr, ConnectionWrite {
+                                queue: Arc::clone(&tls_queue),
+                                ssn: 0, rsn: 0,
+                                last_sent: HashMap::new(),
+                                log_collector: lc.clone(),
+                            });
+                            let tls_connections = connections.clone();
                             tokio::task::spawn_blocking(move || {
                                 let tcp_stream = stream.into_std().expect("into_std");
                                 // into_std() preserves tokio's non-blocking mode; switch to
@@ -474,16 +484,21 @@ impl SlaveServer {
                                                 format!("TLS 握手失败: {} - {}", peer_str, e),
                                             ));
                                         }
+                                        // Clean up connection entry on failure
+                                        let rt = tokio::runtime::Handle::try_current();
+                                        if let Ok(h) = rt { h.block_on(async { tls_connections.write().await.remove(&peer_addr); }); }
                                         return;
                                     }
                                 };
+                                // Set read timeout so the loop can periodically drain the write queue.
+                                let _ = tls_stream.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(100)));
                                 if let Some(ref lc) = lc {
                                     lc.try_add(LogEntry::new(
                                         Direction::Rx, FrameLabel::ConnectionEvent,
                                         format!("TLS 握手成功: {}", peer_str),
                                     ));
                                 }
-                                handleClientBlocking(&mut tls_stream, stations, lc, flag);
+                                handleClientBlocking(&mut tls_stream, stations, lc, flag, tls_queue, tls_connections, peer_addr);
                             });
                         } else {
                             // Plain TCP: async with queue-based cyclic writes.
@@ -1003,19 +1018,38 @@ fn handleClientBlocking(
     stations: SharedStations,
     log_collector: Option<Arc<LogCollector>>,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+    write_queue: SharedQueue,
+    connections: SharedConnections,
+    peer_addr: SocketAddr,
 ) {
     use std::io::{Read, Write};
     let mut buf = [0u8; 512];
     let mut ssn: u16 = 0;
     let mut rsn: u16 = 0;
 
+    // Helper: drain the shared write queue to the TLS stream.
+    let drain_queue = |stream: &mut native_tls::TlsStream<TcpStream>, queue: &SharedQueue| {
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            let pending = rt.block_on(async {
+                let mut q = queue.lock().await;
+                if q.is_empty() { Vec::new() } else { q.drain(..).collect::<Vec<u8>>() }
+            });
+            if !pending.is_empty() {
+                let _ = stream.write_all(&pending);
+            }
+        }
+    };
+
     loop {
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
+        // Drain any externally queued bytes (e.g. from queue_spontaneous) before blocking on read.
+        drain_queue(stream, &write_queue);
         let n = match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                // Timeout hit — drain queue and continue waiting for data.
+                drain_queue(stream, &write_queue);
                 continue;
             }
             Err(_) => break,
@@ -1460,6 +1494,10 @@ fn handleClientBlocking(
                 }
             }
         }
+    }
+    // Clean up the connection entry when the client disconnects.
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        rt.block_on(async { connections.write().await.remove(&peer_addr); });
     }
 }
 

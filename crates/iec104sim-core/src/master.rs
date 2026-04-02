@@ -49,6 +49,12 @@ pub struct TlsConfig {
     /// Path to client private key file (PEM format)
     #[serde(default)]
     pub key_file: String,
+    /// Path to client PKCS#12 bundle for mutual TLS (preferred on macOS)
+    #[serde(default)]
+    pub pkcs12_file: String,
+    /// Password for the PKCS#12 bundle
+    #[serde(default)]
+    pub pkcs12_password: String,
     /// Accept invalid/self-signed certificates (for testing)
     #[serde(default)]
     pub accept_invalid_certs: bool,
@@ -405,8 +411,16 @@ impl MasterConnection {
             builder.add_root_certificate(ca_cert);
         }
 
-        // Load client certificate and key if provided (mutual TLS)
-        if !self.config.tls.cert_file.is_empty() && !self.config.tls.key_file.is_empty() {
+        // Load client identity for mutual TLS.
+        // Prefer PKCS#12 (works on macOS Security framework with ECDSA keys);
+        // fall back to PEM cert+key if no PKCS#12 is configured.
+        if !self.config.tls.pkcs12_file.is_empty() {
+            let p12_bytes = std::fs::read(&self.config.tls.pkcs12_file)
+                .map_err(|e| MasterError::TlsError(format!("读取客户端 PKCS#12 失败 {}: {}", self.config.tls.pkcs12_file, e)))?;
+            let identity = native_tls::Identity::from_pkcs12(&p12_bytes, &self.config.tls.pkcs12_password)
+                .map_err(|e| MasterError::TlsError(format!("加载客户端身份 (PKCS#12) 失败: {}", e)))?;
+            builder.identity(identity);
+        } else if !self.config.tls.cert_file.is_empty() && !self.config.tls.key_file.is_empty() {
             let cert_pem = std::fs::read(&self.config.tls.cert_file)
                 .map_err(|e| MasterError::TlsError(format!("读取客户端证书失败 {}: {}", self.config.tls.cert_file, e)))?;
             let key_pem = std::fs::read(&self.config.tls.key_file)

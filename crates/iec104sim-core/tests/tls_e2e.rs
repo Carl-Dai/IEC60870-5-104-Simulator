@@ -324,6 +324,8 @@ async fn test_tls_handshake_one_way() {
             ca_file: paths.ca_cert.to_str().unwrap().to_string(),
             cert_file: String::new(),
             key_file: String::new(),
+            pkcs12_file: String::new(),
+            pkcs12_password: String::new(),
             accept_invalid_certs: false,
         },
         ..Default::default()
@@ -343,3 +345,69 @@ async fn test_tls_handshake_one_way() {
     // Protocol assertions
     capture::assert_tls_encrypted(&cap.pcap_path, port);
 }
+
+// =========================================================================
+// Test: Mutual TLS handshake (server + client auth)
+// =========================================================================
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_tls_handshake_mtls() {
+    if !check_tools_available() { return; }
+
+    let port = free_port();
+    let certs = cert_gen::generate();
+    let tmp = tempfile::tempdir().unwrap();
+    let paths = cert_gen::write_to_dir(&certs, tmp.path());
+
+    // Slave with mTLS config (PKCS12 for identity)
+    let transport = SlaveTransportConfig {
+        bind_address: "127.0.0.1".to_string(),
+        port,
+        tls: SlaveTlsConfig {
+            enabled: true,
+            cert_file: String::new(),
+            key_file: String::new(),
+            ca_file: paths.ca_cert.to_str().unwrap().to_string(),
+            require_client_cert: true,
+            pkcs12_file: paths.server_pkcs12.to_str().unwrap().to_string(),
+            pkcs12_password: cert_gen::PKCS12_PASS.to_string(),
+        },
+    };
+    let mut slave = SlaveServer::new(transport);
+    slave.add_station(Station::with_default_points(1, "mTLS Test", 2)).await.unwrap();
+    slave.start().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+
+    let mut cap = capture::start("tls_handshake_mtls", port)
+        .expect("failed to start capture");
+    sleep(Duration::from_millis(500)).await;
+
+    // Master with client cert via PKCS12 (macOS Security framework requires this for ECDSA)
+    let config = MasterConfig {
+        target_address: "127.0.0.1".to_string(),
+        port,
+        common_address: 1,
+        tls: TlsConfig {
+            enabled: true,
+            ca_file: paths.ca_cert.to_str().unwrap().to_string(),
+            cert_file: String::new(),
+            key_file: String::new(),
+            pkcs12_file: paths.client_pkcs12.to_str().unwrap().to_string(),
+            pkcs12_password: cert_gen::PKCS12_PASS.to_string(),
+            accept_invalid_certs: false,
+        },
+        ..Default::default()
+    };
+    let mut master = MasterConnection::new(config);
+    let connect_result = master.connect().await;
+    assert!(connect_result.is_ok(), "mTLS connection should succeed: {:?}", connect_result.err());
+    sleep(Duration::from_millis(500)).await;
+
+    master.disconnect().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+    slave.stop().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+    cap.stop().expect("failed to stop capture");
+
+    capture::assert_tls_encrypted(&cap.pcap_path, port);
+}
+
