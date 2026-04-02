@@ -1,6 +1,7 @@
 use iec104sim_core::data_point::DataPointValue;
 use iec104sim_core::master::{MasterConfig, MasterConnection};
 use iec104sim_core::slave::{SlaveServer, SlaveTransportConfig, Station};
+use iec104sim_core::types::AsduTypeId;
 use tokio::time::{sleep, Duration};
 
 fn free_port() -> u16 {
@@ -44,7 +45,7 @@ async fn test_single_command_writeback() {
     // Verify GI populated IOA=1
     {
         let data = master.received_data.read().await;
-        assert!(data.get(1).is_some(), "IOA=1 should exist after GI");
+        assert!(data.get(1, AsduTypeId::MSpNa1).is_some(), "IOA=1 should exist after GI");
     }
 
     // Send single command: IOA=1, value=true, select=false (direct execute)
@@ -55,7 +56,7 @@ async fn test_single_command_writeback() {
     {
         let stations = slave.stations.read().await;
         let st = stations.get(&1).unwrap();
-        let point = st.data_points.get(1).unwrap();
+        let point = st.data_points.get(1, AsduTypeId::MSpNa1).unwrap();
         assert_eq!(point.value, DataPointValue::SinglePoint { value: true },
             "Slave data point should be SinglePoint(true)");
     }
@@ -63,7 +64,7 @@ async fn test_single_command_writeback() {
     // Check master received the spontaneous update (COT=3)
     {
         let data = master.received_data.read().await;
-        let point = data.get(1).unwrap();
+        let point = data.get(1, AsduTypeId::MSpNa1).unwrap();
         assert_eq!(point.value, DataPointValue::SinglePoint { value: true },
             "Master should see SinglePoint(true) via COT=3 writeback");
     }
@@ -108,14 +109,14 @@ async fn test_double_command_writeback() {
 
     {
         let stations = slave.stations.read().await;
-        let point = stations.get(&1).unwrap().data_points.get(3).unwrap();
+        let point = stations.get(&1).unwrap().data_points.get(3, AsduTypeId::MDpNa1).unwrap();
         assert_eq!(point.value, DataPointValue::DoublePoint { value: 2 },
             "Slave DP IOA=3 should be 2");
     }
 
     {
         let data = master.received_data.read().await;
-        let point = data.get(3).unwrap();
+        let point = data.get(3, AsduTypeId::MDpNa1).unwrap();
         assert_eq!(point.value, DataPointValue::DoublePoint { value: 2 },
             "Master should see DP=2 via writeback");
     }
@@ -160,14 +161,14 @@ async fn test_setpoint_float_writeback() {
 
     {
         let stations = slave.stations.read().await;
-        let point = stations.get(&1).unwrap().data_points.get(13).unwrap();
+        let point = stations.get(&1).unwrap().data_points.get(13, AsduTypeId::MMeNc1).unwrap();
         assert_eq!(point.value, DataPointValue::ShortFloat { value: 42.5 },
             "Slave float should be 42.5");
     }
 
     {
         let data = master.received_data.read().await;
-        let point = data.get(13).unwrap();
+        let point = data.get(13, AsduTypeId::MMeNc1).unwrap();
         assert_eq!(point.value, DataPointValue::ShortFloat { value: 42.5 },
             "Master should see float=42.5 via writeback");
     }
@@ -241,9 +242,105 @@ async fn test_sbo_single_command() {
 
     {
         let stations = slave.stations.read().await;
-        let point = stations.get(&1).unwrap().data_points.get(1).unwrap();
+        let point = stations.get(&1).unwrap().data_points.get(1, AsduTypeId::MSpNa1).unwrap();
         assert_eq!(point.value, DataPointValue::SinglePoint { value: true },
             "After SbO, slave should have SP=true");
+    }
+
+    master.disconnect().await.unwrap();
+    slave.stop().await.unwrap();
+}
+
+// =========================================================================
+// Test: Batch add data points with GI verification
+// =========================================================================
+#[tokio::test]
+async fn test_batch_add_then_gi() {
+    let port = free_port();
+
+    let transport = SlaveTransportConfig {
+        bind_address: "127.0.0.1".to_string(),
+        port,
+        ..Default::default()
+    };
+    let mut slave = SlaveServer::new(transport);
+    let mut station = Station::new(1, "Test");
+    station.batch_add_points(1, 10, AsduTypeId::MMeNc1, "FL").unwrap();
+    slave.add_station(station).await.unwrap();
+    slave.start().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+
+    let config = MasterConfig {
+        target_address: "127.0.0.1".to_string(),
+        port,
+        common_address: 1,
+        ..Default::default()
+    };
+    let mut master = MasterConnection::new(config);
+    master.connect().await.unwrap();
+    sleep(Duration::from_millis(500)).await;
+
+    master.send_interrogation(1).await.unwrap();
+    sleep(Duration::from_millis(2000)).await;
+
+    {
+        let data = master.received_data.read().await;
+        for ioa in 1u32..=10 {
+            let point = data.get(ioa, AsduTypeId::MMeNc1).unwrap_or_else(|| panic!("IOA={} should exist after GI", ioa));
+            assert!(
+                matches!(point.value, DataPointValue::ShortFloat { .. }),
+                "IOA={} should be ShortFloat, got {:?}",
+                ioa,
+                point.value
+            );
+        }
+    }
+
+    master.disconnect().await.unwrap();
+    slave.stop().await.unwrap();
+}
+
+// =========================================================================
+// Test: Batch add different types at same IOA range, both coexist via GI
+// =========================================================================
+#[tokio::test]
+async fn test_batch_add_coexist_then_gi() {
+    let port = free_port();
+
+    let transport = SlaveTransportConfig {
+        bind_address: "127.0.0.1".to_string(),
+        port,
+        ..Default::default()
+    };
+    let mut slave = SlaveServer::new(transport);
+    let mut station = Station::new(1, "Test");
+    station.batch_add_points(1, 5, AsduTypeId::MSpNa1, "SP").unwrap();
+    station.batch_add_points(1, 5, AsduTypeId::MMeNc1, "FL").unwrap();
+    assert_eq!(station.data_points.len(), 10); // 5 SP + 5 FL coexist
+    slave.add_station(station).await.unwrap();
+    slave.start().await.unwrap();
+    sleep(Duration::from_millis(300)).await;
+
+    let config = MasterConfig {
+        target_address: "127.0.0.1".to_string(),
+        port,
+        common_address: 1,
+        ..Default::default()
+    };
+    let mut master = MasterConnection::new(config);
+    master.connect().await.unwrap();
+    sleep(Duration::from_millis(500)).await;
+
+    master.send_interrogation(1).await.unwrap();
+    sleep(Duration::from_millis(2000)).await;
+
+    // Master should have received both types for IOA 1-5
+    {
+        let data = master.received_data.read().await;
+        for ioa in 1u32..=5 {
+            assert!(data.get(ioa, AsduTypeId::MSpNa1).is_some(), "IOA={} SP should exist after GI", ioa);
+            assert!(data.get(ioa, AsduTypeId::MMeNc1).is_some(), "IOA={} FL should exist after GI", ioa);
+        }
     }
 
     master.disconnect().await.unwrap();

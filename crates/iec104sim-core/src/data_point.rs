@@ -124,11 +124,12 @@ impl DataPoint {
     }
 }
 
-/// Storage for all data points in a station (analogous to RegisterMap).
+/// Storage for all data points in a station.
+/// Keyed by (IOA, AsduTypeId) so the same IOA can hold different ASDU types.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DataPointMap {
-    /// Data points keyed by IOA.
-    pub points: HashMap<u32, DataPoint>,
+    /// Data points keyed by (IOA, AsduTypeId).
+    pub points: HashMap<(u32, AsduTypeId), DataPoint>,
     /// Monotonically increasing sequence counter, stamped on each insert.
     seq_counter: u64,
 }
@@ -138,26 +139,36 @@ impl DataPointMap {
         Self::default()
     }
 
-    pub fn get(&self, ioa: u32) -> Option<&DataPoint> {
-        self.points.get(&ioa)
+    pub fn get(&self, ioa: u32, asdu_type: AsduTypeId) -> Option<&DataPoint> {
+        self.points.get(&(ioa, asdu_type))
     }
 
-    pub fn get_mut(&mut self, ioa: u32) -> Option<&mut DataPoint> {
-        self.points.get_mut(&ioa)
+    pub fn get_mut(&mut self, ioa: u32, asdu_type: AsduTypeId) -> Option<&mut DataPoint> {
+        self.points.get_mut(&(ioa, asdu_type))
+    }
+
+    /// Find any point at the given IOA whose category matches.
+    pub fn get_by_category(&self, ioa: u32, category: DataCategory) -> Option<&DataPoint> {
+        self.points.values().find(|p| p.ioa == ioa && p.asdu_type.category() == category)
+    }
+
+    /// Find any point (mutable) at the given IOA whose category matches.
+    pub fn get_mut_by_category(&mut self, ioa: u32, category: DataCategory) -> Option<&mut DataPoint> {
+        self.points.values_mut().find(|p| p.ioa == ioa && p.asdu_type.category() == category)
     }
 
     pub fn insert(&mut self, mut point: DataPoint) {
         self.seq_counter += 1;
         point.update_seq = self.seq_counter;
-        self.points.insert(point.ioa, point);
+        self.points.insert((point.ioa, point.asdu_type), point);
     }
 
-    pub fn remove(&mut self, ioa: u32) -> Option<DataPoint> {
-        self.points.remove(&ioa)
+    pub fn remove(&mut self, ioa: u32, asdu_type: AsduTypeId) -> Option<DataPoint> {
+        self.points.remove(&(ioa, asdu_type))
     }
 
-    pub fn contains(&self, ioa: u32) -> bool {
-        self.points.contains_key(&ioa)
+    pub fn contains(&self, ioa: u32, asdu_type: AsduTypeId) -> bool {
+        self.points.contains_key(&(ioa, asdu_type))
     }
 
     pub fn len(&self) -> usize {
@@ -230,12 +241,18 @@ mod tests {
         map.insert(DataPoint::new(300, AsduTypeId::MSpNa1));
 
         assert_eq!(map.len(), 3);
-        assert!(map.contains(100));
-        assert!(!map.contains(999));
+        assert!(map.contains(100, AsduTypeId::MSpNa1));
+        assert!(!map.contains(999, AsduTypeId::MSpNa1));
 
         let sp = map.by_category(DataCategory::SinglePoint);
         assert_eq!(sp.len(), 2);
         assert_eq!(sp[0].ioa, 100);
         assert_eq!(sp[1].ioa, 300);
+
+        // Same IOA, different type — should coexist
+        map.insert(DataPoint::new(100, AsduTypeId::MMeNc1));
+        assert_eq!(map.len(), 4);
+        assert!(map.contains(100, AsduTypeId::MSpNa1));
+        assert!(map.contains(100, AsduTypeId::MMeNc1));
     }
 }

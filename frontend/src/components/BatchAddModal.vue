@@ -38,7 +38,7 @@ const isSaving = ref(false)
 const endIoa = computed(() => startIoa.value + count.value - 1)
 
 const isValid = computed(() => {
-  return count.value > 0 && count.value <= 10000 && startIoa.value >= 0
+  return count.value > 0 && count.value <= 100000 && startIoa.value >= 0
 })
 
 watch(() => props.visible, (visible) => {
@@ -55,26 +55,20 @@ async function handleConfirm() {
   if (!isValid.value) return
   isSaving.value = true
 
-  let added = 0
   try {
-    for (let i = 0; i < count.value; i++) {
-      const ioa = startIoa.value + i
-      await invoke('add_data_point', {
-        request: {
-          server_id: props.serverId,
-          common_address: props.commonAddress,
-          ioa,
-          asdu_type: formAsduType.value,
-          name: namePrefix.value ? `${namePrefix.value}_${ioa}` : null,
-          comment: null,
-        },
-      })
-      added++
-    }
+    await invoke('batch_add_data_points', {
+      request: {
+        server_id: props.serverId,
+        common_address: props.commonAddress,
+        start_ioa: startIoa.value,
+        count: count.value,
+        asdu_type: formAsduType.value,
+        name_prefix: namePrefix.value || null,
+      },
+    })
     emit('added')
-    emit('close')
   } catch (e) {
-    await showAlert(`批量添加失败（已添加 ${added} 个）：${e}`)
+    await showAlert(`批量添加失败：${e}`)
   } finally {
     isSaving.value = false
   }
@@ -114,7 +108,7 @@ function handleBackdropClick(e: MouseEvent) {
                 type="number"
                 class="form-input"
                 min="1"
-                max="10000"
+                max="100000"
               />
             </div>
           </div>
@@ -139,7 +133,7 @@ function handleBackdropClick(e: MouseEvent) {
           </div>
 
           <div class="count-info">
-            <span v-if="count > 10000" class="count-warn">范围过大（最多 10000）</span>
+            <span v-if="count > 100000" class="count-warn">范围过大（最多 100000）</span>
             <template v-else>
               <span>IOA 范围：{{ startIoa }} ~ {{ endIoa }}，共将添加 <strong>{{ count }}</strong> 个数据点</span>
             </template>

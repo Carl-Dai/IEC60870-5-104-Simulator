@@ -146,15 +146,11 @@ impl Station {
     }
 
     pub fn add_point(&mut self, def: InformationObjectDef) -> Result<(), SlaveError> {
-        if let Some(existing) = self.data_points.get(def.ioa) {
-            if existing.asdu_type != def.asdu_type {
-                return Ok(());
-            }
-            // Same type — update metadata only, preserve runtime value
-        } else {
+        if !self.data_points.contains(def.ioa, def.asdu_type) {
             self.data_points.insert(DataPoint::new(def.ioa, def.asdu_type));
         }
-        if let Some(existing_def) = self.object_defs.iter_mut().find(|d| d.ioa == def.ioa) {
+        // Update or add metadata
+        if let Some(existing_def) = self.object_defs.iter_mut().find(|d| d.ioa == def.ioa && d.asdu_type == def.asdu_type) {
             *existing_def = def;
         } else {
             self.object_defs.push(def);
@@ -162,11 +158,45 @@ impl Station {
         Ok(())
     }
 
-    pub fn remove_point(&mut self, ioa: u32) -> Result<(), SlaveError> {
-        if !self.data_points.contains(ioa) { return Err(SlaveError::IoaNotFound(ioa)); }
-        self.data_points.remove(ioa);
-        self.object_defs.retain(|d| d.ioa != ioa);
+    pub fn remove_point(&mut self, ioa: u32, asdu_type: AsduTypeId) -> Result<(), SlaveError> {
+        if !self.data_points.contains(ioa, asdu_type) { return Err(SlaveError::IoaNotFound(ioa)); }
+        self.data_points.remove(ioa, asdu_type);
+        self.object_defs.retain(|d| !(d.ioa == ioa && d.asdu_type == asdu_type));
         Ok(())
+    }
+
+    /// Batch-add data points with consecutive IOAs starting from `start_ioa`.
+    /// Optimized: avoids O(n) linear search in object_defs per point.
+    pub fn batch_add_points(
+        &mut self,
+        start_ioa: u32,
+        count: u32,
+        asdu_type: AsduTypeId,
+        name_prefix: &str,
+    ) -> Result<u32, SlaveError> {
+        use std::collections::HashSet;
+        let category = asdu_type.category();
+        // Pre-build set of existing (ioa, type) for O(1) lookup
+        let existing: HashSet<(u32, AsduTypeId)> = self.object_defs.iter()
+            .map(|d| (d.ioa, d.asdu_type))
+            .collect();
+        for i in 0..count {
+            let ioa = start_ioa + i;
+            if !self.data_points.contains(ioa, asdu_type) {
+                self.data_points.insert(DataPoint::new(ioa, asdu_type));
+            }
+            let name = if name_prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{}_{}", name_prefix, ioa)
+            };
+            if !existing.contains(&(ioa, asdu_type)) {
+                self.object_defs.push(InformationObjectDef {
+                    ioa, asdu_type, category, name, comment: String::new(),
+                });
+            }
+        }
+        Ok(count)
     }
 }
 
@@ -200,9 +230,9 @@ impl Default for SlaveTransportConfig {
 struct ConnectionWrite {
     /// Mutex-protected byte queue. Write task drains this.
     queue: Arc<tokio::sync::Mutex<Vec<u8>>>,
-    /// Sequence numbers.
-    ssn: u8,
-    rsn: u8,
+    /// Sequence numbers (N(S)<<1 and N(R)<<1, 16-bit).
+    ssn: u16,
+    rsn: u16,
     /// Last sent value string per IOA.
     last_sent: HashMap<u32, String>,
     /// Logger.
@@ -270,9 +300,9 @@ impl SlaveServer {
         Ok(())
     }
 
-    /// Queue spontaneous I-frames (COT=3) for the given IOAs to all connected clients.
-    pub async fn queue_spontaneous(&self, common_address: u16, changed_ioas: &[u32]) {
-        if changed_ioas.is_empty() { return; }
+    /// Queue spontaneous I-frames (COT=3) for the given (IOA, type) pairs to all connected clients.
+    pub async fn queue_spontaneous(&self, common_address: u16, changed: &[(u32, AsduTypeId)]) {
+        if changed.is_empty() { return; }
         let stations = self.stations.read().await;
         let station = match stations.get(&common_address) {
             Some(s) => s,
@@ -282,8 +312,8 @@ impl SlaveServer {
         let mut conns = self.connections.write().await;
         for (_addr, conn) in conns.iter_mut() {
             let mut batch = Vec::new();
-            for &ioa in changed_ioas {
-                let point = match station.data_points.get(ioa) {
+            for &(ioa, asdu_type) in changed {
+                let point = match station.data_points.get(ioa, asdu_type) {
                     Some(p) => p,
                     None => continue,
                 };
@@ -545,8 +575,8 @@ async fn handleClientReadLoop(
 ) {
     let mut buf = [0u8; 8192];
     let mut reassembly_buf: Vec<u8> = Vec::with_capacity(65536);
-    let mut ssn: u8 = 0;
-    let mut rsn: u8 = 0;
+    let mut ssn: u16 = 0;
+    let mut rsn: u16 = 0;
 
     loop {
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
@@ -698,7 +728,7 @@ async fn handleClientReadLoop(
                             if !is_select {
                                 let mut s = stations.write().await;
                                 if let Some(st) = s.get_mut(&ca) {
-                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                    if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::SinglePoint) {
                                         dp.value = DataPointValue::SinglePoint { value };
                                         dp.timestamp = Some(chrono::Utc::now());
                                     }
@@ -712,11 +742,10 @@ async fn handleClientReadLoop(
                                 // Send spontaneous update (COT=3) after control execution
                                 let sr = stations.read().await;
                                 if let Some(st) = sr.get(&ca) {
-                                    if let Some(point) = st.data_points.get(ioa) {
+                                    if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::SinglePoint) {
                                         let ca_b = ca.to_le_bytes();
                                         let ioa_b = ioa.to_le_bytes();
-                                        let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                         queue.lock().await.extend_from_slice(&spont);
                                     }
                                 }
@@ -737,7 +766,7 @@ async fn handleClientReadLoop(
                             if !is_select {
                                 let mut s = stations.write().await;
                                 if let Some(st) = s.get_mut(&ca) {
-                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                    if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::DoublePoint) {
                                         dp.value = DataPointValue::DoublePoint { value };
                                         dp.timestamp = Some(chrono::Utc::now());
                                     }
@@ -750,11 +779,10 @@ async fn handleClientReadLoop(
                                 queue.lock().await.extend_from_slice(&term);
                                 let sr = stations.read().await;
                                 if let Some(st) = sr.get(&ca) {
-                                    if let Some(point) = st.data_points.get(ioa) {
+                                    if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::DoublePoint) {
                                         let ca_b = ca.to_le_bytes();
                                         let ioa_b = ioa.to_le_bytes();
-                                        let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                         queue.lock().await.extend_from_slice(&spont);
                                     }
                                 }
@@ -775,7 +803,7 @@ async fn handleClientReadLoop(
                             if !is_select {
                                 let mut s = stations.write().await;
                                 if let Some(st) = s.get_mut(&ca) {
-                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                    if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::StepPosition) {
                                         if let DataPointValue::StepPosition { ref mut value, .. } = dp.value {
                                             match step_val { 1 => { if *value > -64 { *value -= 1; } } 2 => { if *value < 63 { *value += 1; } } _ => {} }
                                             dp.timestamp = Some(chrono::Utc::now());
@@ -790,11 +818,10 @@ async fn handleClientReadLoop(
                                 queue.lock().await.extend_from_slice(&term);
                                 let sr = stations.read().await;
                                 if let Some(st) = sr.get(&ca) {
-                                    if let Some(point) = st.data_points.get(ioa) {
+                                    if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::StepPosition) {
                                         let ca_b = ca.to_le_bytes();
                                         let ioa_b = ioa.to_le_bytes();
-                                        let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                         queue.lock().await.extend_from_slice(&spont);
                                     }
                                 }
@@ -818,7 +845,7 @@ async fn handleClientReadLoop(
                             if !is_select {
                                 let mut s = stations.write().await;
                                 if let Some(st) = s.get_mut(&ca) {
-                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                    if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::NormalizedMeasured) {
                                         dp.value = DataPointValue::Normalized { value };
                                         dp.timestamp = Some(chrono::Utc::now());
                                     }
@@ -831,11 +858,10 @@ async fn handleClientReadLoop(
                                 queue.lock().await.extend_from_slice(&term);
                                 let sr = stations.read().await;
                                 if let Some(st) = sr.get(&ca) {
-                                    if let Some(point) = st.data_points.get(ioa) {
+                                    if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::NormalizedMeasured) {
                                         let ca_b = ca.to_le_bytes();
                                         let ioa_b = ioa.to_le_bytes();
-                                        let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                         queue.lock().await.extend_from_slice(&spont);
                                     }
                                 }
@@ -857,7 +883,7 @@ async fn handleClientReadLoop(
                             if !is_select {
                                 let mut s = stations.write().await;
                                 if let Some(st) = s.get_mut(&ca) {
-                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                    if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::ScaledMeasured) {
                                         dp.value = DataPointValue::Scaled { value: sva };
                                         dp.timestamp = Some(chrono::Utc::now());
                                     }
@@ -870,11 +896,10 @@ async fn handleClientReadLoop(
                                 queue.lock().await.extend_from_slice(&term);
                                 let sr = stations.read().await;
                                 if let Some(st) = sr.get(&ca) {
-                                    if let Some(point) = st.data_points.get(ioa) {
+                                    if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::ScaledMeasured) {
                                         let ca_b = ca.to_le_bytes();
                                         let ioa_b = ioa.to_le_bytes();
-                                        let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                         queue.lock().await.extend_from_slice(&spont);
                                     }
                                 }
@@ -896,7 +921,7 @@ async fn handleClientReadLoop(
                             if !is_select {
                                 let mut s = stations.write().await;
                                 if let Some(st) = s.get_mut(&ca) {
-                                    if let Some(dp) = st.data_points.get_mut(ioa) {
+                                    if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::FloatMeasured) {
                                         dp.value = DataPointValue::ShortFloat { value };
                                         dp.timestamp = Some(chrono::Utc::now());
                                     }
@@ -909,11 +934,10 @@ async fn handleClientReadLoop(
                                 queue.lock().await.extend_from_slice(&term);
                                 let sr = stations.read().await;
                                 if let Some(st) = sr.get(&ca) {
-                                    if let Some(point) = st.data_points.get(ioa) {
+                                    if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::FloatMeasured) {
                                         let ca_b = ca.to_le_bytes();
                                         let ioa_b = ioa.to_le_bytes();
-                                        let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                        let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                         queue.lock().await.extend_from_slice(&spont);
                                     }
                                 }
@@ -962,6 +986,8 @@ fn handleClientBlocking(
 ) {
     use std::io::{Read, Write};
     let mut buf = [0u8; 512];
+    let mut ssn: u16 = 0;
+    let mut rsn: u16 = 0;
 
     loop {
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
@@ -1070,8 +1096,8 @@ fn handleClientBlocking(
                                     }
                                     // Counter interrogation: send only IntegratedTotals points
                                     let ca_bytes = station.common_address.to_le_bytes();
-                                    let mut ssn: u8 = 0;
-                                    let mut rsn: u8 = 0;
+                                    let mut ssn: u16 = 0;
+                                    let mut rsn: u16 = 0;
                                     for point in station.data_points.all_sorted() {
                                         let ioa_bytes = point.ioa.to_le_bytes();
                                         let asdu = match &point.value {
@@ -1119,7 +1145,7 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let mut s = stations.write().await;
                                         if let Some(st) = s.get_mut(&ca) {
-                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                            if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::SinglePoint) {
                                                 dp.value = DataPointValue::SinglePoint { value };
                                                 dp.timestamp = Some(chrono::Utc::now());
                                             }
@@ -1137,11 +1163,10 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let sr = stations.read().await;
                                         if let Some(st) = sr.get(&ca) {
-                                            if let Some(point) = st.data_points.get(ioa) {
+                                            if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::SinglePoint) {
                                                 let ca_b = ca.to_le_bytes();
                                                 let ioa_b = ioa.to_le_bytes();
-                                                let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                                 let _ = stream.write_all(&spont);
                                             }
                                         }
@@ -1168,7 +1193,7 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let mut s = stations.write().await;
                                         if let Some(st) = s.get_mut(&ca) {
-                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                            if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::DoublePoint) {
                                                 dp.value = DataPointValue::DoublePoint { value };
                                                 dp.timestamp = Some(chrono::Utc::now());
                                             }
@@ -1186,11 +1211,10 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let sr = stations.read().await;
                                         if let Some(st) = sr.get(&ca) {
-                                            if let Some(point) = st.data_points.get(ioa) {
+                                            if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::DoublePoint) {
                                                 let ca_b = ca.to_le_bytes();
                                                 let ioa_b = ioa.to_le_bytes();
-                                                let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                                 let _ = stream.write_all(&spont);
                                             }
                                         }
@@ -1217,7 +1241,7 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let mut s = stations.write().await;
                                         if let Some(st) = s.get_mut(&ca) {
-                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                            if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::StepPosition) {
                                                 if let DataPointValue::StepPosition { ref mut value, .. } = dp.value {
                                                     match step_val { 1 => { if *value > -64 { *value -= 1; } } 2 => { if *value < 63 { *value += 1; } } _ => {} }
                                                     dp.timestamp = Some(chrono::Utc::now());
@@ -1237,11 +1261,10 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let sr = stations.read().await;
                                         if let Some(st) = sr.get(&ca) {
-                                            if let Some(point) = st.data_points.get(ioa) {
+                                            if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::StepPosition) {
                                                 let ca_b = ca.to_le_bytes();
                                                 let ioa_b = ioa.to_le_bytes();
-                                                let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                                 let _ = stream.write_all(&spont);
                                             }
                                         }
@@ -1271,7 +1294,7 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let mut s = stations.write().await;
                                         if let Some(st) = s.get_mut(&ca) {
-                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                            if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::NormalizedMeasured) {
                                                 dp.value = DataPointValue::Normalized { value };
                                                 dp.timestamp = Some(chrono::Utc::now());
                                             }
@@ -1289,11 +1312,10 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let sr = stations.read().await;
                                         if let Some(st) = sr.get(&ca) {
-                                            if let Some(point) = st.data_points.get(ioa) {
+                                            if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::NormalizedMeasured) {
                                                 let ca_b = ca.to_le_bytes();
                                                 let ioa_b = ioa.to_le_bytes();
-                                                let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                                 let _ = stream.write_all(&spont);
                                             }
                                         }
@@ -1321,7 +1343,7 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let mut s = stations.write().await;
                                         if let Some(st) = s.get_mut(&ca) {
-                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                            if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::ScaledMeasured) {
                                                 dp.value = DataPointValue::Scaled { value: sva };
                                                 dp.timestamp = Some(chrono::Utc::now());
                                             }
@@ -1339,11 +1361,10 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let sr = stations.read().await;
                                         if let Some(st) = sr.get(&ca) {
-                                            if let Some(point) = st.data_points.get(ioa) {
+                                            if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::ScaledMeasured) {
                                                 let ca_b = ca.to_le_bytes();
                                                 let ioa_b = ioa.to_le_bytes();
-                                                let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                                 let _ = stream.write_all(&spont);
                                             }
                                         }
@@ -1371,7 +1392,7 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let mut s = stations.write().await;
                                         if let Some(st) = s.get_mut(&ca) {
-                                            if let Some(dp) = st.data_points.get_mut(ioa) {
+                                            if let Some(dp) = st.data_points.get_mut_by_category(ioa, DataCategory::FloatMeasured) {
                                                 dp.value = DataPointValue::ShortFloat { value };
                                                 dp.timestamp = Some(chrono::Utc::now());
                                             }
@@ -1389,11 +1410,10 @@ fn handleClientBlocking(
                                     handle.block_on(async {
                                         let sr = stations.read().await;
                                         if let Some(st) = sr.get(&ca) {
-                                            if let Some(point) = st.data_points.get(ioa) {
+                                            if let Some(point) = st.data_points.get_by_category(ioa, DataCategory::FloatMeasured) {
                                                 let ca_b = ca.to_le_bytes();
                                                 let ioa_b = ioa.to_le_bytes();
-                                                let mut s0: u8 = 0; let mut r0: u8 = 0;
-                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut s0, &mut r0);
+                                                let spont = encode_point_frame(&point.value, 3, &ca_b, &ioa_b[..3], &mut ssn, &mut rsn);
                                                 let _ = stream.write_all(&spont);
                                             }
                                         }
@@ -1429,8 +1449,8 @@ fn sendGiResponseBlocking(
 ) {
     use std::io::Write;
     let ca_bytes = station.common_address.to_le_bytes();
-    let mut ssn: u8 = 0;
-    let mut rsn: u8 = 0;
+    let mut ssn: u16 = 0;
+    let mut rsn: u16 = 0;
     for point in station.data_points.all_sorted() {
         let ioa_bytes = point.ioa.to_le_bytes();
         let asdu = encode_point_frame(&point.value, 20, &ca_bytes, &ioa_bytes[..3], &mut ssn, &mut rsn);
@@ -1444,7 +1464,7 @@ fn sendGiResponseBlocking(
 
 fn build_i_frame(
     asdu_type: u8, cause: u8, ca: &[u8], ioa: &[u8], value_bytes: &[u8],
-    ssn: &mut u8, rsn: &mut u8,
+    ssn: &mut u16, rsn: &mut u16,
 ) -> Vec<u8> {
     let asdu_len = 6 + ioa.len() + value_bytes.len();
     let total_len = 4 + asdu_len;
@@ -1452,14 +1472,15 @@ fn build_i_frame(
     frame.push(0x68);
     frame.push(total_len as u8);
     // 4 APCI control bytes for I-frame:
-    // Bytes 2-3: N(S) << 1 (bit 0 = 0 indicates I-frame)
-    // Bytes 4-5: N(R) << 1
-    frame.push(*ssn);
-    frame.push(0x00);
-    frame.push(*rsn);
-    frame.push(0x00);
-    *ssn = ssn.wrapping_add(2) & 0x7F;
-    *rsn = rsn.wrapping_add(2) & 0x7F;
+    // Bytes 2-3: N(S) << 1, 16-bit little-endian (bit 0 = 0 indicates I-frame)
+    // Bytes 4-5: N(R) << 1, 16-bit little-endian
+    frame.push((*ssn & 0xFF) as u8);
+    frame.push(((*ssn >> 8) & 0xFF) as u8);
+    frame.push((*rsn & 0xFF) as u8);
+    frame.push(((*rsn >> 8) & 0xFF) as u8);
+    *ssn = ssn.wrapping_add(2);
+    // N(R) is not auto-incremented per sent frame; it tracks the peer's N(S).
+    // Leaving rsn unchanged here — it should only be updated when receiving I-frames.
     frame.extend_from_slice(&[asdu_type, 0x01, cause, 0x00]);
     frame.extend_from_slice(&ca[..2]);
     frame.extend_from_slice(ioa);
@@ -1470,7 +1491,7 @@ fn build_i_frame(
 /// Encode a data point value into an I-frame with the given COT.
 fn encode_point_frame(
     value: &DataPointValue, cot: u8, ca: &[u8], ioa: &[u8],
-    ssn: &mut u8, rsn: &mut u8,
+    ssn: &mut u16, rsn: &mut u16,
 ) -> Vec<u8> {
     match value {
         DataPointValue::SinglePoint { value } => {
@@ -1548,5 +1569,59 @@ mod tests {
         let station = Station::new(1, "站1");
         server.add_station(station).await.unwrap();
         assert!(server.add_station(Station::new(1, "重复")).await.is_err());
+    }
+
+    #[test]
+    fn test_add_point_coexist_different_type() {
+        let mut station = Station::new(1, "Test");
+        let def_sp = InformationObjectDef {
+            ioa: 100,
+            asdu_type: AsduTypeId::MSpNa1,
+            category: DataCategory::SinglePoint,
+            name: "SP".to_string(),
+            comment: String::new(),
+        };
+        station.add_point(def_sp).unwrap();
+        assert_eq!(station.data_points.len(), 1);
+        assert_eq!(station.data_points.get(100, AsduTypeId::MSpNa1).unwrap().asdu_type, AsduTypeId::MSpNa1);
+
+        // Add float type at same IOA — should coexist
+        let def_float = InformationObjectDef {
+            ioa: 100,
+            asdu_type: AsduTypeId::MMeNc1,
+            category: DataCategory::FloatMeasured,
+            name: "Float".to_string(),
+            comment: String::new(),
+        };
+        station.add_point(def_float).unwrap();
+        assert_eq!(station.data_points.len(), 2); // both coexist
+        assert!(station.data_points.get(100, AsduTypeId::MSpNa1).is_some());
+        assert!(station.data_points.get(100, AsduTypeId::MMeNc1).is_some());
+        assert_eq!(station.object_defs.len(), 2);
+    }
+
+    #[test]
+    fn test_batch_add_points() {
+        let mut station = Station::new(1, "Test");
+        let added = station.batch_add_points(100, 50, AsduTypeId::MSpNa1, "SP").unwrap();
+        assert_eq!(added, 50);
+        assert_eq!(station.data_points.len(), 50);
+
+        for i in 0..50u32 {
+            let ioa = 100 + i;
+            let point = station.data_points.get(ioa, AsduTypeId::MSpNa1).unwrap();
+            assert_eq!(point.asdu_type, AsduTypeId::MSpNa1);
+        }
+        assert_eq!(station.object_defs.len(), 50);
+        assert_eq!(station.object_defs[0].name, "SP_100");
+        assert_eq!(station.object_defs[49].name, "SP_149");
+
+        // Add different type at same IOA range — should coexist
+        station.batch_add_points(100, 50, AsduTypeId::MMeNc1, "FL").unwrap();
+        assert_eq!(station.data_points.len(), 100); // 50 SP + 50 FL
+        for i in 0..50u32 {
+            assert!(station.data_points.get(100 + i, AsduTypeId::MSpNa1).is_some());
+            assert!(station.data_points.get(100 + i, AsduTypeId::MMeNc1).is_some());
+        }
     }
 }

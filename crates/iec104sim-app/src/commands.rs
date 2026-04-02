@@ -323,24 +323,65 @@ pub async fn add_data_point(
         .map_err(|e| format!("failed to add point: {}", e))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BatchAddDataPointsRequest {
+    pub server_id: String,
+    pub common_address: u16,
+    pub start_ioa: u32,
+    pub count: u32,
+    pub asdu_type: String,
+    pub name_prefix: Option<String>,
+}
+
+#[tauri::command]
+pub async fn batch_add_data_points(
+    state: State<'_, AppState>,
+    request: BatchAddDataPointsRequest,
+) -> Result<u32, String> {
+    let servers = state.servers.read().await;
+    let srv = servers
+        .get(&request.server_id)
+        .ok_or_else(|| format!("server {} not found", request.server_id))?;
+
+    let asdu_type = parse_asdu_type(&request.asdu_type)?;
+
+    let mut stations = srv.server.stations.write().await;
+    let station = stations
+        .get_mut(&request.common_address)
+        .ok_or_else(|| format!("station CA={} not found", request.common_address))?;
+
+    station
+        .batch_add_points(
+            request.start_ioa,
+            request.count,
+            asdu_type,
+            request.name_prefix.as_deref().unwrap_or(""),
+        )
+        .map_err(|e| format!("failed to batch add points: {}", e))
+}
+
 #[tauri::command]
 pub async fn remove_data_point(
     state: State<'_, AppState>,
     server_id: String,
     common_address: u16,
     ioa: u32,
+    asdu_type: String,
 ) -> Result<(), String> {
     let servers = state.servers.read().await;
     let srv = servers
         .get(&server_id)
         .ok_or_else(|| format!("server {} not found", server_id))?;
 
+    let asdu = parse_asdu_type(&asdu_type)?;
+
     let mut stations = srv.server.stations.write().await;
     let station = stations
         .get_mut(&common_address)
         .ok_or_else(|| format!("station CA={} not found", common_address))?;
 
-    station.remove_point(ioa)
+    station.remove_point(ioa, asdu)
         .map_err(|e| format!("failed to remove point: {}", e))
 }
 
@@ -350,6 +391,7 @@ pub async fn update_data_point(
     server_id: String,
     common_address: u16,
     ioa: u32,
+    asdu_type: String,
     value: String,
 ) -> Result<(), String> {
     let servers = state.servers.read().await;
@@ -357,13 +399,15 @@ pub async fn update_data_point(
         .get(&server_id)
         .ok_or_else(|| format!("server {} not found", server_id))?;
 
+    let asdu = parse_asdu_type(&asdu_type)?;
+
     let mut stations = srv.server.stations.write().await;
     let station = stations
         .get_mut(&common_address)
         .ok_or_else(|| format!("station CA={} not found", common_address))?;
 
-    let point = station.data_points.get_mut(ioa)
-        .ok_or_else(|| format!("IOA {} not found", ioa))?;
+    let point = station.data_points.get_mut(ioa, asdu)
+        .ok_or_else(|| format!("IOA {} type {} not found", ioa, asdu_type))?;
 
     // Parse value based on current type
     let new_value = match &point.value {
@@ -404,7 +448,7 @@ pub async fn update_data_point(
     point.timestamp = Some(chrono::Utc::now());
 
     drop(stations);
-    srv.server.queue_spontaneous(common_address, &[ioa]).await;
+    srv.server.queue_spontaneous(common_address, &[(ioa, asdu)]).await;
 
     Ok(())
 }
@@ -429,10 +473,15 @@ pub async fn list_data_points(
     let points = station.data_points.all_sorted();
     let defs = &station.object_defs;
 
+    // Build O(1) lookup map instead of O(n) linear search per point
+    let def_map: std::collections::HashMap<(u32, AsduTypeId), &InformationObjectDef> = defs.iter()
+        .map(|d| ((d.ioa, d.asdu_type), d))
+        .collect();
+
     let result: Vec<DataPointInfo> = points
         .iter()
         .map(|p| {
-            let def = defs.iter().find(|d| d.ioa == p.ioa);
+            let def = def_map.get(&(p.ioa, p.asdu_type));
             DataPointInfo {
                 ioa: p.ioa,
                 asdu_type: p.asdu_type.name().to_string(),
@@ -519,19 +568,19 @@ pub async fn random_mutate_data_points(
     let (mutated, changed_ioas) = {
         let mut rng = rand::rng();
         let mut mutated = 0u32;
-        let mut changed_ioas = Vec::new();
+        let mut changed_ioas: Vec<(u32, AsduTypeId)> = Vec::new();
 
-        let ioas: Vec<u32> = station.data_points.points.keys().copied().collect();
-        let count = (ioas.len() * 30 / 100).max(3).min(ioas.len());
+        let keys: Vec<(u32, AsduTypeId)> = station.data_points.points.keys().copied().collect();
+        let count = (keys.len() * 30 / 100).max(3).min(keys.len());
 
-        let mut pick = ioas;
+        let mut pick = keys;
         for i in (1..pick.len()).rev() {
             let j = rng.random_range(0..=i);
             pick.swap(i, j);
         }
 
-        for &ioa in &pick[..count] {
-            if let Some(point) = station.data_points.get_mut(ioa) {
+        for &(ioa, asdu_type) in &pick[..count] {
+            if let Some(point) = station.data_points.get_mut(ioa, asdu_type) {
                 point.value = match &point.value {
                     DataPointValue::SinglePoint { value } => {
                         DataPointValue::SinglePoint { value: !value }
@@ -562,7 +611,7 @@ pub async fn random_mutate_data_points(
                     other => other.clone(),
                 };
                 point.timestamp = Some(chrono::Utc::now());
-                changed_ioas.push(ioa);
+                changed_ioas.push((ioa, asdu_type));
                 mutated += 1;
             }
         }

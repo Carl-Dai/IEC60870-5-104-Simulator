@@ -64,6 +64,7 @@ async function writeValue() {
       serverId: selectedServerId.value,
       commonAddress: selectedCA.value,
       ioa: firstPoint.value.ioa,
+      asduType: pointDetail.value?.asdu_type ?? '',
       value: editValue.value,
     })
     refreshData()

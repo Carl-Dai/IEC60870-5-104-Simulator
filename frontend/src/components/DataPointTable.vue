@@ -19,7 +19,8 @@ const selectedCategory = inject<Ref<string | null>>('selectedCategory')!
 const dataRefreshKey = inject<Ref<number>>('dataRefreshKey')!
 
 // === Core data: plain JS Map + shallowRef (same pattern as master DataTable) ===
-let dataMap = new Map<number, DataPointInfo>()
+function pointKey(ioa: number, asduType: string) { return `${ioa}:${asduType}` }
+let dataMap = new Map<string, DataPointInfo>()
 const displayPoints = shallowRef<DataPointInfo[]>([])
 const categoryCounts = inject<Ref<Map<string, number>>>('categoryCounts')!
 let currentServerId: string | null = null
@@ -28,7 +29,7 @@ let currentCA: number | null = null
 // === UI state ===
 const selectedRows = ref<DataPointInfo[]>([])
 const lastClickedIndex = ref(-1)
-const editingCell = ref<{ ioa: number } | null>(null)
+const editingCell = ref<{ ioa: number; asduType: string } | null>(null)
 const editValue = ref('')
 const isLoading = ref(false)
 const searchQuery = ref('')
@@ -76,11 +77,12 @@ async function loadDataPoints() {
       commonAddress: selectedCA.value,
     })
     for (const p of points) {
-      const old = dataMap.get(p.ioa)
+      const key = pointKey(p.ioa, p.asdu_type)
+      const old = dataMap.get(key)
       if (!old || old.value !== p.value) {
         markChanged(p.ioa)
       }
-      dataMap.set(p.ioa, p)
+      dataMap.set(key, p)
     }
     updateDisplay()
   } catch (e) {
@@ -261,13 +263,13 @@ function handleTableKeydown(e: KeyboardEvent) {
 }
 
 function startEdit(point: DataPointInfo) {
-  editingCell.value = { ioa: point.ioa }
+  editingCell.value = { ioa: point.ioa, asduType: point.asdu_type }
   editValue.value = point.value
 }
 
 async function commitEdit() {
   if (!editingCell.value || !selectedServerId.value || currentCA === null) return
-  const { ioa } = editingCell.value
+  const { ioa, asduType } = editingCell.value
   const value = editValue.value
   editingCell.value = null
 
@@ -276,6 +278,7 @@ async function commitEdit() {
       serverId: selectedServerId.value,
       commonAddress: currentCA,
       ioa,
+      asduType,
       value,
     })
     await loadDataPoints()
@@ -306,11 +309,11 @@ function onPointAdded() {
 }
 
 // Context menu for delete
-const contextMenu = ref({ show: false, x: 0, y: 0, ioa: 0 })
+const contextMenu = ref({ show: false, x: 0, y: 0, ioa: 0, asduType: '' })
 
 function showContextMenu(e: MouseEvent, point: DataPointInfo) {
   e.preventDefault()
-  contextMenu.value = { show: true, x: e.clientX, y: e.clientY, ioa: point.ioa }
+  contextMenu.value = { show: true, x: e.clientX, y: e.clientY, ioa: point.ioa, asduType: point.asdu_type }
 }
 
 function closeContextMenu() {
@@ -326,6 +329,7 @@ async function deletePoint() {
       serverId: selectedServerId.value,
       commonAddress: currentCA,
       ioa,
+      asduType: contextMenu.value.asduType,
     })
     if (selectedRows.value.some(r => r.ioa === ioa)) {
       selectedRows.value = selectedRows.value.filter(r => r.ioa !== ioa)
@@ -415,7 +419,7 @@ defineExpose({ loadData: loadDataPoints })
               <td class="col-type">{{ point.asdu_type }}</td>
               <td class="col-name">{{ point.name || '-' }}</td>
               <td :class="['col-value', { 'value-highlight': changedIoas.has(point.ioa) }]" @dblclick.stop="startEdit(point)">
-                <template v-if="editingCell?.ioa === point.ioa">
+                <template v-if="editingCell?.ioa === point.ioa && editingCell?.asduType === point.asdu_type">
                   <input
                     v-model="editValue"
                     class="edit-input"

@@ -63,7 +63,6 @@ async function handleConfirm() {
       },
     })
     emit('added')
-    emit('close')
   } catch (e) {
     await showAlert(String(e))
   } finally {
