@@ -412,10 +412,58 @@ async fn test_tls_handshake_mtls() {
 }
 
 // =========================================================================
+// Helper: Run GI + spontaneous + control protocol checks
+// =========================================================================
+
+async fn run_protocol_checks(slave: &SlaveServer, master: &MasterConnection) {
+    // --- 1. General Interrogation ---
+    master.send_interrogation(1).await.unwrap();
+    sleep(Duration::from_millis(1000)).await;
+
+    {
+        let data = master.received_data.read().await;
+        assert!(data.get(100, AsduTypeId::MSpNa1).is_some(), "IOA=100 (SP) should exist after GI");
+        assert!(data.get(200, AsduTypeId::MMeNc1).is_some(), "IOA=200 (Float) should exist after GI");
+    }
+
+    // --- 2. Spontaneous (Change-of-State) ---
+    {
+        let mut stations = slave.stations.write().await;
+        let st = stations.get_mut(&1).unwrap();
+        let point = st.data_points.get_mut(100, AsduTypeId::MSpNa1).unwrap();
+        point.value = DataPointValue::SinglePoint { value: true };
+    }
+    slave.queue_spontaneous(1, &[(100, AsduTypeId::MSpNa1)]).await;
+    sleep(Duration::from_millis(1000)).await;
+
+    {
+        let data = master.received_data.read().await;
+        let point = data.get(100, AsduTypeId::MSpNa1).unwrap();
+        assert_eq!(point.value, DataPointValue::SinglePoint { value: true },
+            "Master should receive spontaneous update: SP=true");
+    }
+
+    // --- 3. Control Command (single point) ---
+    master.send_single_command(100, false, false, 1).await.unwrap();
+    sleep(Duration::from_millis(1000)).await;
+
+    {
+        let stations = slave.stations.read().await;
+        let point = stations.get(&1).unwrap().data_points.get(100, AsduTypeId::MSpNa1).unwrap();
+        assert_eq!(point.value, DataPointValue::SinglePoint { value: false },
+            "Slave data point should be updated by control command");
+    }
+
+    {
+        let data = master.received_data.read().await;
+        let point = data.get(100, AsduTypeId::MSpNa1).unwrap();
+        assert_eq!(point.value, DataPointValue::SinglePoint { value: false },
+            "Master should see control writeback via COT=3");
+    }
+}
+
+// =========================================================================
 // Test: Full IEC 104 protocol over one-way TLS
-//   1. General Interrogation
-//   2. Spontaneous (change-of-state)
-//   3. Control command (single point)
 // =========================================================================
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_tls_full_protocol() {
@@ -470,65 +518,7 @@ async fn test_tls_full_protocol() {
     master.connect().await.unwrap();
     sleep(Duration::from_millis(500)).await;
 
-    // --- 1. General Interrogation ---
-    master.send_interrogation(1).await.unwrap();
-    sleep(Duration::from_millis(2000)).await;
-
-    {
-        let data = master.received_data.read().await;
-        assert!(
-            data.get(100, AsduTypeId::MSpNa1).is_some(),
-            "IOA=100 (SP) should exist after GI"
-        );
-        assert!(
-            data.get(200, AsduTypeId::MMeNc1).is_some(),
-            "IOA=200 (Float) should exist after GI"
-        );
-    }
-
-    // --- 2. Spontaneous (Change-of-State) ---
-    {
-        let mut stations = slave.stations.write().await;
-        let st = stations.get_mut(&1).unwrap();
-        let point = st.data_points.get_mut(100, AsduTypeId::MSpNa1).unwrap();
-        point.value = DataPointValue::SinglePoint { value: true };
-    }
-    slave.queue_spontaneous(1, &[(100, AsduTypeId::MSpNa1)]).await;
-    sleep(Duration::from_millis(2000)).await;
-
-    {
-        let data = master.received_data.read().await;
-        let point = data.get(100, AsduTypeId::MSpNa1).unwrap();
-        assert_eq!(
-            point.value,
-            DataPointValue::SinglePoint { value: true },
-            "Master should receive spontaneous update: SP=true"
-        );
-    }
-
-    // --- 3. Control Command (single point) ---
-    master.send_single_command(100, false, false, 1).await.unwrap();
-    sleep(Duration::from_millis(2000)).await;
-
-    {
-        let stations = slave.stations.read().await;
-        let point = stations.get(&1).unwrap().data_points.get(100, AsduTypeId::MSpNa1).unwrap();
-        assert_eq!(
-            point.value,
-            DataPointValue::SinglePoint { value: false },
-            "Slave data point should be updated by control command"
-        );
-    }
-
-    {
-        let data = master.received_data.read().await;
-        let point = data.get(100, AsduTypeId::MSpNa1).unwrap();
-        assert_eq!(
-            point.value,
-            DataPointValue::SinglePoint { value: false },
-            "Master should see control writeback via COT=3"
-        );
-    }
+    run_protocol_checks(&slave, &master).await;
 
     master.disconnect().await.unwrap();
     sleep(Duration::from_millis(300)).await;
@@ -595,65 +585,7 @@ async fn test_tls_mtls_full_protocol() {
     master.connect().await.unwrap();
     sleep(Duration::from_millis(500)).await;
 
-    // --- 1. General Interrogation ---
-    master.send_interrogation(1).await.unwrap();
-    sleep(Duration::from_millis(2000)).await;
-
-    {
-        let data = master.received_data.read().await;
-        assert!(
-            data.get(100, AsduTypeId::MSpNa1).is_some(),
-            "IOA=100 (SP) should exist after GI over mTLS"
-        );
-        assert!(
-            data.get(200, AsduTypeId::MMeNc1).is_some(),
-            "IOA=200 (Float) should exist after GI over mTLS"
-        );
-    }
-
-    // --- 2. Spontaneous (Change-of-State) ---
-    {
-        let mut stations = slave.stations.write().await;
-        let st = stations.get_mut(&1).unwrap();
-        let point = st.data_points.get_mut(100, AsduTypeId::MSpNa1).unwrap();
-        point.value = DataPointValue::SinglePoint { value: true };
-    }
-    slave.queue_spontaneous(1, &[(100, AsduTypeId::MSpNa1)]).await;
-    sleep(Duration::from_millis(2000)).await;
-
-    {
-        let data = master.received_data.read().await;
-        let point = data.get(100, AsduTypeId::MSpNa1).unwrap();
-        assert_eq!(
-            point.value,
-            DataPointValue::SinglePoint { value: true },
-            "Master should receive spontaneous update over mTLS"
-        );
-    }
-
-    // --- 3. Control Command ---
-    master.send_single_command(100, false, false, 1).await.unwrap();
-    sleep(Duration::from_millis(2000)).await;
-
-    {
-        let stations = slave.stations.read().await;
-        let point = stations.get(&1).unwrap().data_points.get(100, AsduTypeId::MSpNa1).unwrap();
-        assert_eq!(
-            point.value,
-            DataPointValue::SinglePoint { value: false },
-            "Slave data point should be updated by control over mTLS"
-        );
-    }
-
-    {
-        let data = master.received_data.read().await;
-        let point = data.get(100, AsduTypeId::MSpNa1).unwrap();
-        assert_eq!(
-            point.value,
-            DataPointValue::SinglePoint { value: false },
-            "Master should see control writeback over mTLS"
-        );
-    }
+    run_protocol_checks(&slave, &master).await;
 
     master.disconnect().await.unwrap();
     sleep(Duration::from_millis(300)).await;

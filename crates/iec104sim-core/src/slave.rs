@@ -1029,29 +1029,28 @@ fn handle_client_blocking(
     let mut ssn: u16 = 0;
     let mut rsn: u16 = 0;
 
-    // Helper: drain the shared write queue to the TLS stream.
-    let drain_queue = |stream: &mut native_tls::TlsStream<TcpStream>, queue: &SharedQueue| {
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let pending = rt.block_on(async {
-                let mut q = queue.lock().await;
-                if q.is_empty() { Vec::new() } else { q.drain(..).collect::<Vec<u8>>() }
-            });
-            if !pending.is_empty() {
-                let _ = stream.write_all(&pending);
-            }
+    // Cache the runtime handle once — this function always runs inside spawn_blocking.
+    let rt = tokio::runtime::Handle::current();
+
+    // Drain the shared write queue to the TLS stream.
+    let drain_queue = |stream: &mut native_tls::TlsStream<TcpStream>, queue: &SharedQueue, rt: &tokio::runtime::Handle| {
+        let pending = rt.block_on(async {
+            let mut q = queue.lock().await;
+            if q.is_empty() { Vec::new() } else { q.drain(..).collect::<Vec<u8>>() }
+        });
+        if !pending.is_empty() {
+            let _ = stream.write_all(&pending);
         }
     };
 
     loop {
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) { break; }
-        // Drain any externally queued bytes (e.g. from queue_spontaneous) before blocking on read.
-        drain_queue(stream, &write_queue);
         let n = match stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
                 // Timeout hit — drain queue and continue waiting for data.
-                drain_queue(stream, &write_queue);
+                drain_queue(stream, &write_queue, &rt);
                 continue;
             }
             Err(_) => break,
@@ -1498,9 +1497,7 @@ fn handle_client_blocking(
         }
     }
     // Clean up the connection entry when the client disconnects.
-    if let Ok(rt) = tokio::runtime::Handle::try_current() {
-        rt.block_on(async { connections.write().await.remove(&peer_addr); });
-    }
+    rt.block_on(async { connections.write().await.remove(&peer_addr); });
 }
 
 fn send_gi_response_blocking(
