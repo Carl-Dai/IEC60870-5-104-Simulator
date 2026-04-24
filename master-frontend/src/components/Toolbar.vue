@@ -21,10 +21,11 @@ const newConnForm = ref({
   port: 2404,
   common_address: 1,
   use_tls: false,
-  ca_file: '',
-  cert_file: '',
-  key_file: '',
+  ca_file: 'certs/ca.pem',
+  cert_file: 'certs/client.pem',
+  key_file: 'certs/client-key.pem',
   accept_invalid_certs: false,
+  tls_version: 'auto' as 'auto' | 'tls12_only' | 'tls13_only',
 })
 
 async function createConnection() {
@@ -39,6 +40,7 @@ async function createConnection() {
         cert_file: newConnForm.value.cert_file || undefined,
         key_file: newConnForm.value.key_file || undefined,
         accept_invalid_certs: newConnForm.value.accept_invalid_certs,
+        tls_version: newConnForm.value.use_tls ? newConnForm.value.tls_version : undefined,
       }
     })
     showNewConn.value = false
@@ -208,6 +210,14 @@ const hasConnection = () => selectedConnectionId.value !== null
           </div>
 
           <template v-if="newConnForm.use_tls">
+            <label class="form-label">
+              TLS 版本
+              <select v-model="newConnForm.tls_version" class="form-input">
+                <option value="auto">自动</option>
+                <option value="tls12_only">仅 TLS 1.2</option>
+                <option value="tls13_only">仅 TLS 1.3</option>
+              </select>
+            </label>
             <label class="form-label">
               CA 证书路径
               <input v-model="newConnForm.ca_file" class="form-input" type="text" placeholder="/path/to/ca.crt" />
