@@ -430,8 +430,22 @@ impl MasterConnection {
     fn create_tls_stream(&self, tcp_stream: TcpStream) -> Result<native_tls::TlsStream<TcpStream>, MasterError> {
         let mut builder = native_tls::TlsConnector::builder();
 
-        // Set minimum TLS version to 1.2 (IEC 62351 requirement)
-        builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
+        // Apply configured TLS version policy. For `Tls13Only` we pin both ends
+        // explicitly — macOS Security Framework silently downgrades `max=Tlsv13`
+        // to 1.2 if `min != Tlsv13` (see native-tls 0.2.18 imp/security_framework.rs).
+        match self.config.tls.version {
+            TlsVersionPolicy::Auto => {
+                builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
+            }
+            TlsVersionPolicy::Tls12Only => {
+                builder.min_protocol_version(Some(native_tls::Protocol::Tlsv12));
+                builder.max_protocol_version(Some(native_tls::Protocol::Tlsv12));
+            }
+            TlsVersionPolicy::Tls13Only => {
+                builder.min_protocol_version(Some(native_tls::Protocol::Tlsv13));
+                builder.max_protocol_version(Some(native_tls::Protocol::Tlsv13));
+            }
+        }
 
         // Load CA certificate if provided
         if !self.config.tls.ca_file.is_empty() {
