@@ -39,6 +39,7 @@ pub struct CreateConnectionRequest {
 #[tauri::command]
 pub async fn create_connection(
     state: State<'_, AppState>,
+    app_handle: AppHandle,
     request: CreateConnectionRequest,
 ) -> Result<ConnectionInfo, String> {
     let id = {
@@ -68,13 +69,31 @@ pub async fn create_connection(
     let connection = MasterConnection::new(config.clone())
         .with_log_collector(log_collector.clone());
 
+    // Forward state-change notifications from the core connection to the frontend.
+    // Exits when the connection is dropped (`delete_connection`) and its `state_tx` closes.
+    let mut state_rx = connection.subscribe_state();
+    let id_for_task = id.clone();
+    let app_handle_for_task = app_handle.clone();
+    tokio::spawn(async move {
+        while state_rx.changed().await.is_ok() {
+            let new_state = *state_rx.borrow_and_update();
+            let _ = app_handle_for_task.emit(
+                "connection-state",
+                ConnectionStateEvent {
+                    id: id_for_task.clone(),
+                    state: format!("{:?}", new_state),
+                },
+            );
+        }
+    });
+
     let use_tls = config.tls.enabled;
     let info = ConnectionInfo {
         id: id.clone(),
         target_address: config.target_address,
         port: config.port,
         common_address: config.common_address,
-        state: format!("{:?}", connection.state().await),
+        state: format!("{:?}", connection.state()),
         use_tls,
     };
 
@@ -89,58 +108,40 @@ pub async fn create_connection(
     Ok(info)
 }
 
+// `connection-state` events are emitted by the watcher spawned in
+// `create_connection`, driven by the core's state channel. These commands
+// therefore do not need to emit manually.
+
 #[tauri::command]
 pub async fn connect_master(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     id: String,
 ) -> Result<(), String> {
-    let state_str: String;
-    {
-        let mut connections = state.connections.write().await;
-        let conn = connections
-            .get_mut(&id)
-            .ok_or_else(|| format!("connection {} not found", id))?;
+    let mut connections = state.connections.write().await;
+    let conn = connections
+        .get_mut(&id)
+        .ok_or_else(|| format!("connection {} not found", id))?;
 
-        conn.connection
-            .connect()
-            .await
-            .map_err(|e| format!("failed to connect: {}", e))?;
-        state_str = format!("{:?}", conn.connection.state().await);
-    }
-
-    app_handle.emit("connection-state", ConnectionStateEvent {
-        id, state: state_str,
-    }).map_err(|e| e.to_string())?;
-
-    Ok(())
+    conn.connection
+        .connect()
+        .await
+        .map_err(|e| format!("failed to connect: {}", e))
 }
 
 #[tauri::command]
 pub async fn disconnect_master(
     state: State<'_, AppState>,
-    app_handle: AppHandle,
     id: String,
 ) -> Result<(), String> {
-    let state_str: String;
-    {
-        let mut connections = state.connections.write().await;
-        let conn = connections
-            .get_mut(&id)
-            .ok_or_else(|| format!("connection {} not found", id))?;
+    let mut connections = state.connections.write().await;
+    let conn = connections
+        .get_mut(&id)
+        .ok_or_else(|| format!("connection {} not found", id))?;
 
-        conn.connection
-            .disconnect()
-            .await
-            .map_err(|e| format!("failed to disconnect: {}", e))?;
-        state_str = format!("{:?}", conn.connection.state().await);
-    }
-
-    app_handle.emit("connection-state", ConnectionStateEvent {
-        id, state: state_str,
-    }).map_err(|e| e.to_string())?;
-
-    Ok(())
+    conn.connection
+        .disconnect()
+        .await
+        .map_err(|e| format!("failed to disconnect: {}", e))
 }
 
 #[tauri::command]
@@ -168,7 +169,7 @@ pub async fn list_connections(
             target_address: conn_state.connection.config.target_address.clone(),
             port: conn_state.connection.config.port,
             common_address: conn_state.connection.config.common_address,
-            state: format!("{:?}", conn_state.connection.state().await),
+            state: format!("{:?}", conn_state.connection.state()),
             use_tls: conn_state.connection.config.tls.enabled,
         });
     }

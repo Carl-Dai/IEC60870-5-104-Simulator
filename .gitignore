@@ -29,3 +29,6 @@ Thumbs.db
 
 # Packet captures from TLS tests
 crates/iec104sim-core/tests/pcap/
+
+# Local generated TLS certs (contain private keys)
+/certs/

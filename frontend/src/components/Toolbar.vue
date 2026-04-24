@@ -3,6 +3,9 @@ import { ref, inject, watch, onUnmounted, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { dialogKey } from '../composables/useDialog'
 import type { showAlert as ShowAlert, showPrompt as ShowPrompt } from '../composables/useDialog'
+import AboutDialog from './AboutDialog.vue'
+
+const showAbout = ref(false)
 
 const selectedServerId = inject<Ref<string | null>>('selectedServerId')!
 const selectedServerState = inject<Ref<string>>('selectedServerState')!
@@ -274,12 +277,14 @@ watch([selectedServerId, selectedCA], () => {
       />
       <span class="rate-label">ms</span>
     </div>
-    <div class="toolbar-title">IEC 104 Slave</div>
+    <button class="toolbar-title as-button" @click="showAbout = true" title="关于">IEC 104 Slave</button>
   </div>
+
+  <AboutDialog :visible="showAbout" @close="showAbout = false" />
 
   <!-- New Server Modal -->
   <Teleport to="body">
-    <div v-if="showNewServerModal" class="modal-overlay" @click.self="showNewServerModal = false">
+    <div v-if="showNewServerModal" class="modal-overlay" @mousedown.self="showNewServerModal = false">
       <div class="modal-box">
         <div class="modal-title">新建服务器</div>
         <div class="modal-field">
@@ -467,6 +472,13 @@ watch([selectedServerId, selectedCA], () => {
   color: #6c7086;
   padding-right: 8px;
 }
+.toolbar-title.as-button {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+.toolbar-title.as-button:hover { color: #cdd6f4; }
 
 /* Modal styles */
 .modal-overlay {

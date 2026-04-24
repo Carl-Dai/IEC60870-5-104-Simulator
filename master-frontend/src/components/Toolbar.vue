@@ -3,12 +3,16 @@ import { inject, ref, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { dialogKey } from '../composables/useDialog'
 import type { showAlert as ShowAlert } from '../composables/useDialog'
+import AboutDialog from './AboutDialog.vue'
 
 const { showAlert } = inject<{ showAlert: typeof ShowAlert }>(dialogKey)!
 const selectedConnectionId = inject<Ref<string | null>>('selectedConnectionId')!
 const selectedConnectionState = inject<Ref<string>>('selectedConnectionState')!
 const refreshTree = inject<() => void>('refreshTree')!
 const refreshData = inject<() => void>('refreshData')!
+
+// About dialog
+const showAbout = ref(false)
 
 // New Connection modal
 const showNewConn = ref(false)
@@ -169,12 +173,16 @@ const hasConnection = () => selectedConnectionId.value !== null
     </div>
 
     <div class="toolbar-spacer"></div>
-    <span class="toolbar-title">IEC104 Master</span>
+    <button class="toolbar-title as-button" @click="showAbout = true" title="关于">
+      IEC104 Master
+    </button>
   </div>
+
+  <AboutDialog :visible="showAbout" @close="showAbout = false" />
 
   <!-- New Connection Modal -->
   <Teleport to="body">
-    <div v-if="showNewConn" class="modal-backdrop" @click.self="showNewConn = false">
+    <div v-if="showNewConn" class="modal-backdrop" @mousedown.self="showNewConn = false">
       <div class="modal-box">
         <div class="modal-title">新建连接</div>
         <div class="modal-body">
@@ -290,6 +298,13 @@ const hasConnection = () => selectedConnectionId.value !== null
   color: #6c7086;
   padding-right: 8px;
 }
+.toolbar-title.as-button {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+.toolbar-title.as-button:hover { color: #cdd6f4; }
 
 /* Modal */
 .modal-backdrop {

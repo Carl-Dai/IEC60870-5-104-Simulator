@@ -34,7 +34,7 @@ function handleKeydown(e: KeyboardEvent) {
 
 <template>
   <Teleport to="body">
-    <div v-if="state.visible" class="dialog-backdrop" @click.self="dialogCancel" @keydown="handleKeydown">
+    <div v-if="state.visible" class="dialog-backdrop" @mousedown.self="dialogCancel" @keydown="handleKeydown">
       <div class="dialog" role="dialog" aria-modal="true">
         <div class="dialog-header">
           <span class="dialog-title">{{ state.title }}</span>

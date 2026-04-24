@@ -102,6 +102,10 @@ cargo tauri dev
 - **Frontend**: Vue 3, TypeScript, Vite
 - **Desktop**: Tauri 2
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) or the [Releases page](https://github.com/kelsoprotein-lab/IEC104Sim/releases).
+
 ## License
 
 MIT

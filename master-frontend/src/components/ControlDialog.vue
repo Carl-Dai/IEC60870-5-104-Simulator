@@ -99,7 +99,7 @@ function handleKeydown(e: KeyboardEvent) {
 
 <template>
   <Teleport to="body">
-    <div v-if="visible" class="modal-backdrop" @click.self="emit('close')" @keydown="handleKeydown">
+    <div v-if="visible" class="modal-backdrop" @mousedown.self="emit('close')" @keydown="handleKeydown">
       <div class="modal-box">
         <div class="modal-title">发送控制命令</div>
         <div class="modal-body">

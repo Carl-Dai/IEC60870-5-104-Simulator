@@ -217,7 +217,9 @@ pub struct MasterConnection {
     pub config: MasterConfig,
     pub received_data: SharedReceivedData,
     pub log_collector: Option<Arc<LogCollector>>,
-    state: Arc<RwLock<MasterState>>,
+    /// Current master state. `watch::Sender::borrow()` gives the latest value
+    /// synchronously, and `subscribe()` yields a receiver for change notifications.
+    state_tx: tokio::sync::watch::Sender<MasterState>,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
     stream: Arc<RwLock<Option<MasterStream>>>,
     /// Mutex-protected TLS stream for send operations (TLS streams cannot be cloned).
@@ -232,11 +234,12 @@ pub struct MasterConnection {
 impl MasterConnection {
     pub fn new(config: MasterConfig) -> Self {
         let (control_tx, _) = tokio::sync::broadcast::channel(64);
+        let (state_tx, _) = tokio::sync::watch::channel(MasterState::Disconnected);
         Self {
             config,
             received_data: Arc::new(RwLock::new(DataPointMap::new())),
             log_collector: None,
-            state: Arc::new(RwLock::new(MasterState::Disconnected)),
+            state_tx,
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stream: Arc::new(RwLock::new(None)),
             tls_stream_mutex: None,
@@ -246,22 +249,28 @@ impl MasterConnection {
         }
     }
 
+    /// Subscribe to state-change notifications. The receiver's initial
+    /// `borrow()` yields the current state without blocking.
+    pub fn subscribe_state(&self) -> tokio::sync::watch::Receiver<MasterState> {
+        self.state_tx.subscribe()
+    }
+
     pub fn with_log_collector(mut self, collector: Arc<LogCollector>) -> Self {
         self.log_collector = Some(collector);
         self
     }
 
-    pub async fn state(&self) -> MasterState {
-        *self.state.read().await
+    pub fn state(&self) -> MasterState {
+        *self.state_tx.borrow()
     }
 
     /// Connect to the remote IEC 104 slave (with optional TLS).
     pub async fn connect(&mut self) -> Result<(), MasterError> {
-        if *self.state.read().await == MasterState::Connected {
+        if self.state() == MasterState::Connected {
             return Err(MasterError::AlreadyConnected);
         }
 
-        *self.state.write().await = MasterState::Connecting;
+        self.state_tx.send_replace(MasterState::Connecting);
         // Reset sequence numbers on new connection
         *self.seq.lock().unwrap() = SeqNumbers::new();
 
@@ -272,7 +281,7 @@ impl MasterConnection {
             &addr.parse().map_err(|e| MasterError::ConnectionError(format!("Invalid address: {}", e)))?,
             timeout,
         ).map_err(|e| {
-            *self.state.try_write().unwrap() = MasterState::Error;
+            self.state_tx.send_replace(MasterState::Error);
             MasterError::ConnectionError(format!("Failed to connect to {}: {}", addr, e))
         })?;
 
@@ -343,20 +352,20 @@ impl MasterConnection {
                     .map_err(|e| MasterError::ConnectionError(format!("Failed to send STARTDT: {}", e)))?;
             }
 
-            *self.state.write().await = MasterState::Connected;
+            self.state_tx.send_replace(MasterState::Connected);
 
             // Start receiver thread with mutex-based stream access
             self.shutdown_flag.store(false, std::sync::atomic::Ordering::SeqCst);
             let shutdown_flag = self.shutdown_flag.clone();
             let received_data = self.received_data.clone();
             let log_collector = self.log_collector.clone();
-            let state = self.state.clone();
+            let state_tx = self.state_tx.clone();
             let stream_for_receiver = stream_mutex.clone();
             let seq = self.seq.clone();
             let control_tx = self.control_tx.clone();
 
             let handle = tokio::task::spawn_blocking(move || {
-                receive_loop_mutex(stream_for_receiver, received_data, log_collector, shutdown_flag, state, seq, control_tx);
+                receive_loop_mutex(stream_for_receiver, received_data, log_collector, shutdown_flag, state_tx, seq, control_tx);
             });
 
             self.receiver_handle = Some(handle);
@@ -373,18 +382,18 @@ impl MasterConnection {
             };
 
             *self.stream.write().await = Some(master_stream);
-            *self.state.write().await = MasterState::Connected;
+            self.state_tx.send_replace(MasterState::Connected);
 
             self.shutdown_flag.store(false, std::sync::atomic::Ordering::SeqCst);
             let shutdown_flag = self.shutdown_flag.clone();
             let received_data = self.received_data.clone();
             let log_collector = self.log_collector.clone();
-            let state = self.state.clone();
+            let state_tx = self.state_tx.clone();
             let seq = self.seq.clone();
             let control_tx = self.control_tx.clone();
 
             let handle = tokio::task::spawn_blocking(move || {
-                receive_loop(stream_clone, received_data, log_collector, shutdown_flag, state, seq, control_tx);
+                receive_loop(stream_clone, received_data, log_collector, shutdown_flag, state_tx, seq, control_tx);
             });
 
             self.receiver_handle = Some(handle);
@@ -455,7 +464,7 @@ impl MasterConnection {
 
     /// Disconnect from the remote slave.
     pub async fn disconnect(&mut self) -> Result<(), MasterError> {
-        if *self.state.read().await == MasterState::Disconnected {
+        if self.state() == MasterState::Disconnected {
             return Err(MasterError::NotConnected);
         }
 
@@ -485,7 +494,7 @@ impl MasterConnection {
 
         *self.stream.write().await = None;
         self.tls_stream_mutex = None;
-        *self.state.write().await = MasterState::Disconnected;
+        self.state_tx.send_replace(MasterState::Disconnected);
 
         if let Some(ref lc) = self.log_collector {
             lc.try_add(LogEntry::new(
@@ -703,7 +712,7 @@ fn receive_loop(
     received_data: SharedReceivedData,
     log_collector: Option<Arc<LogCollector>>,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
-    state: Arc<RwLock<MasterState>>,
+    state_tx: tokio::sync::watch::Sender<MasterState>,
     seq: Arc<std::sync::Mutex<SeqNumbers>>,
     control_tx: tokio::sync::broadcast::Sender<ControlResponse>,
 ) {
@@ -717,10 +726,7 @@ fn receive_loop(
 
         let n = match stream.read(&mut read_buf) {
             Ok(0) => {
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    let state = state.clone();
-                    handle.block_on(async { *state.write().await = MasterState::Disconnected; });
-                }
+                state_tx.send_replace(MasterState::Disconnected);
                 if let Some(ref lc) = log_collector {
                     lc.try_add(LogEntry::new(Direction::Rx, FrameLabel::ConnectionEvent, "连接已关闭"));
                 }
@@ -729,7 +735,13 @@ fn receive_loop(
             Ok(n) => n,
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut
                 || e.kind() == std::io::ErrorKind::WouldBlock => continue,
-            Err(_) => break,
+            Err(e) => {
+                state_tx.send_replace(MasterState::Disconnected);
+                if let Some(ref lc) = log_collector {
+                    lc.try_add(LogEntry::new(Direction::Rx, FrameLabel::ConnectionEvent, format!("读取错误,连接断开: {}", e)));
+                }
+                break;
+            }
         };
 
         reassembly_buf.extend_from_slice(&read_buf[..n]);
@@ -757,7 +769,7 @@ fn receive_loop_mutex(
     received_data: SharedReceivedData,
     log_collector: Option<Arc<LogCollector>>,
     shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
-    state: Arc<RwLock<MasterState>>,
+    state_tx: tokio::sync::watch::Sender<MasterState>,
     seq: Arc<std::sync::Mutex<SeqNumbers>>,
     control_tx: tokio::sync::broadcast::Sender<ControlResponse>,
 ) {
@@ -772,14 +784,14 @@ fn receive_loop_mutex(
         let n = {
             let mut locked = match stream.lock() {
                 Ok(s) => s,
-                Err(_) => break,
+                Err(_) => {
+                    state_tx.send_replace(MasterState::Disconnected);
+                    break;
+                }
             };
             match locked.read(&mut read_buf) {
                 Ok(0) => {
-                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                        let state = state.clone();
-                        handle.block_on(async { *state.write().await = MasterState::Disconnected; });
-                    }
+                    state_tx.send_replace(MasterState::Disconnected);
                     if let Some(ref lc) = log_collector {
                         lc.try_add(LogEntry::new(Direction::Rx, FrameLabel::ConnectionEvent, "连接已关闭"));
                     }
@@ -788,7 +800,13 @@ fn receive_loop_mutex(
                 Ok(n) => n,
                 Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut
                     || e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                Err(_) => break,
+                Err(e) => {
+                    state_tx.send_replace(MasterState::Disconnected);
+                    if let Some(ref lc) = log_collector {
+                        lc.try_add(LogEntry::new(Direction::Rx, FrameLabel::ConnectionEvent, format!("读取错误,连接断开: {}", e)));
+                    }
+                    break;
+                }
             }
         };
 

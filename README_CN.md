@@ -102,6 +102,10 @@ cargo tauri dev
 - **前端**：Vue 3、TypeScript、Vite
 - **桌面端**：Tauri 2
 
+## 更新日志
+
+最新变更请参见 [CHANGELOG.md](CHANGELOG.md) 或 [Releases 页面](https://github.com/kelsoprotein-lab/IEC104Sim/releases)。
+
 ## 许可证
 
 MIT
