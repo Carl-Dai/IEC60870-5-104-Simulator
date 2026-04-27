@@ -214,9 +214,9 @@ const text = t(`log.${event.kind}`, event.payload)
 
 ### 默认站名
 
-Rust 侧不再硬编码字符串 `站 1`。改为发送 CA 数值，前端展示时若 station 名称为空则用 `t('station.defaultName', { ca })` 生成显示名。
+Rust 侧不再硬编码字符串 `站 1`。改为：station 名称字段在创建时为空字符串，CA 数值随结构体存储。前端展示时若 `name` 为空则用 `t('station.defaultName', { ca })` 生成显示名。
 
-或者 Rust 直接保留固定英文 `Station {ca}`（仅作为内部标识），前端展示时若识别到该格式则替换为本地化字符串。设计倾向前者（语义更清晰）；具体在实现计划中再敲定。
+这样翻译源单一（前端字典），不会有"已存储为某种语言后切换 locale 失效"的问题。
 
 ### 兼容性
 
