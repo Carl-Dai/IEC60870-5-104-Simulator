@@ -5,6 +5,9 @@ import { dialogKey } from '../composables/useDialog'
 import type { showAlert as ShowAlert } from '../composables/useDialog'
 import AboutDialog from './AboutDialog.vue'
 import LangSwitch from './LangSwitch.vue'
+import { useI18n } from '../i18n'
+
+const { t } = useI18n()
 
 const { showAlert } = inject<{ showAlert: typeof ShowAlert }>(dialogKey)!
 const selectedConnectionId = inject<Ref<string | null>>('selectedConnectionId')!
@@ -187,7 +190,7 @@ const hasConnection = () => selectedConnectionId.value !== null
   <div class="toolbar">
     <div class="toolbar-group">
       <button class="toolbar-btn" @click="showNewConn = true">
-        <span class="btn-icon">+</span> 新建连接
+        <span class="btn-icon">+</span> {{ t('toolbar.newConnection') }}
       </button>
     </div>
 
@@ -195,13 +198,13 @@ const hasConnection = () => selectedConnectionId.value !== null
 
     <div class="toolbar-group">
       <button class="toolbar-btn btn-start" :disabled="!hasConnection() || isConnected()" @click="connectMaster">
-        连接
+        {{ t('toolbar.connect') }}
       </button>
       <button class="toolbar-btn btn-stop" :disabled="!hasConnection() || !isConnected()" @click="disconnectMaster">
-        断开
+        {{ t('toolbar.disconnect') }}
       </button>
       <button class="toolbar-btn btn-close" :disabled="!hasConnection()" @click="deleteMaster">
-        删除
+        {{ t('toolbar.delete') }}
       </button>
     </div>
 
@@ -209,20 +212,20 @@ const hasConnection = () => selectedConnectionId.value !== null
 
     <div class="toolbar-group">
       <button class="toolbar-btn" :disabled="!hasConnection() || !isConnected()" @click="sendGI">
-        总召唤
+        {{ t('toolbar.sendGI') }}
       </button>
       <button class="toolbar-btn" :disabled="!hasConnection() || !isConnected()" @click="sendClockSync">
-        时钟同步
+        {{ t('toolbar.clockSync') }}
       </button>
       <button class="toolbar-btn" :disabled="!hasConnection() || !isConnected()" @click="sendCounterRead">
-        累计量召唤
+        {{ t('toolbar.counterRead') }}
       </button>
     </div>
 
     <div class="toolbar-spacer"></div>
     <LangSwitch />
-    <button class="toolbar-title as-button" @click="showAbout = true" title="关于">
-      IEC104 Master
+    <button class="toolbar-title as-button" @click="showAbout = true" :title="t('toolbar.about')">
+      {{ t('toolbar.appTitle') }}
     </button>
   </div>
 
@@ -232,18 +235,18 @@ const hasConnection = () => selectedConnectionId.value !== null
   <Teleport to="body">
     <div v-if="showNewConn" class="modal-backdrop" @mousedown.self="showNewConn = false">
       <div class="modal-box">
-        <div class="modal-title">新建连接</div>
+        <div class="modal-title">{{ t('newConn.title') }}</div>
         <div class="modal-body">
           <label class="form-label">
-            目标地址
+            {{ t('newConn.targetAddress') }}
             <input v-model="newConnForm.target_address" class="form-input" type="text" placeholder="127.0.0.1" />
           </label>
           <label class="form-label">
-            端口
+            {{ t('newConn.port') }}
             <input v-model.number="newConnForm.port" class="form-input" type="number" min="1" max="65535" />
           </label>
           <label class="form-label">
-            公共地址 (CA)
+            {{ t('newConn.commonAddress') }}
             <input v-model.number="newConnForm.common_address" class="form-input" type="number" min="1" max="65534" />
           </label>
 
@@ -251,40 +254,40 @@ const hasConnection = () => selectedConnectionId.value !== null
           <div class="tls-section">
             <label class="form-label form-checkbox">
               <input type="checkbox" v-model="newConnForm.use_tls" />
-              <span>启用 TLS</span>
+              <span>{{ t('newConn.enableTls') }}</span>
             </label>
           </div>
 
           <template v-if="newConnForm.use_tls">
             <label class="form-label">
-              TLS 版本
+              {{ t('newConn.tlsVersion') }}
               <select v-model="newConnForm.tls_version" class="form-input">
-                <option value="auto">自动</option>
-                <option value="tls12_only">仅 TLS 1.2</option>
-                <option value="tls13_only">仅 TLS 1.3</option>
+                <option value="auto">{{ t('newConn.tlsAuto') }}</option>
+                <option value="tls12_only">{{ t('newConn.tls12') }}</option>
+                <option value="tls13_only">{{ t('newConn.tls13') }}</option>
               </select>
             </label>
             <label class="form-label">
-              CA 证书路径
+              {{ t('newConn.caFile') }}
               <input v-model="newConnForm.ca_file" class="form-input" type="text" placeholder="/path/to/ca.crt" />
             </label>
             <label class="form-label">
-              客户端证书路径
+              {{ t('newConn.certFile') }}
               <input v-model="newConnForm.cert_file" class="form-input" type="text" placeholder="/path/to/client.crt" />
             </label>
             <label class="form-label">
-              客户端密钥路径
+              {{ t('newConn.keyFile') }}
               <input v-model="newConnForm.key_file" class="form-input" type="text" placeholder="/path/to/client.key" />
             </label>
             <label class="form-label form-checkbox">
               <input type="checkbox" v-model="newConnForm.accept_invalid_certs" />
-              <span>接受无效证书（测试用）</span>
+              <span>{{ t('newConn.acceptInvalidCerts') }}</span>
             </label>
           </template>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-secondary" @click="showNewConn = false">取消</button>
-          <button class="btn btn-primary" @click="createConnection">创建</button>
+          <button class="btn btn-secondary" @click="showNewConn = false">{{ t('common.cancel') }}</button>
+          <button class="btn btn-primary" @click="createConnection">{{ t('newConn.create') }}</button>
         </div>
       </div>
     </div>
