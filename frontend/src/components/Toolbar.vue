@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { dialogKey } from '../composables/useDialog'
 import type { showAlert as ShowAlert, showPrompt as ShowPrompt } from '../composables/useDialog'
 import AboutDialog from './AboutDialog.vue'
+import LangSwitch from './LangSwitch.vue'
 
 const showAbout = ref(false)
 
@@ -277,6 +278,7 @@ watch([selectedServerId, selectedCA], () => {
       />
       <span class="rate-label">ms</span>
     </div>
+    <LangSwitch />
     <button class="toolbar-title as-button" @click="showAbout = true" title="关于">IEC 104 Slave</button>
   </div>
 
