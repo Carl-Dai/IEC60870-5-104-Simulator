@@ -4,6 +4,9 @@ import { invoke } from '@tauri-apps/api/core'
 import type { ReceivedDataPointInfo, IncrementalDataResponse, CommandType, ControlResult } from '../types'
 import { getControlConfig } from '../types'
 import ControlDialog from './ControlDialog.vue'
+import { useI18n, localizeCategoryLabel } from '../i18n'
+
+const { t } = useI18n()
 
 const emit = defineEmits<{
   (e: 'point-select', points: ReceivedDataPointInfo[]): void
@@ -214,12 +217,15 @@ function handleRowClick(localIdx: number, event: MouseEvent) {
   emit('point-select', selected)
 }
 
-const categoryTitle = computed(() => selectedCategory.value ?? '全部数据')
+const categoryTitle = computed(() =>
+  selectedCategory.value ? localizeCategoryLabel(selectedCategory.value) : t('table.allData')
+)
 const totalCount = computed(() => displayPoints.value.length)
 const filteredCount = computed(() => filteredPoints.value.length)
 const pointCountLabel = computed(() => {
-  if (!selectedCategory.value && !searchFilter.value) return `${totalCount.value} 个`
-  return `${filteredCount.value} / ${totalCount.value} 个`
+  const suffix = t('table.countSuffix')
+  if (!selectedCategory.value && !searchFilter.value) return `${totalCount.value}${suffix ? ' ' + suffix : ''}`
+  return `${filteredCount.value} / ${totalCount.value}${suffix ? ' ' + suffix : ''}`
 })
 
 // === Right-click context menu ===
@@ -276,7 +282,7 @@ function ctxCopy(text: string) {
   hideContextMenu()
 }
 
-// ControlDialog state (for "自由控制...")
+// ControlDialog state (for free-control entry)
 const showControlDialog = ref(false)
 const controlDialogIoa = ref<number | null>(null)
 const controlDialogType = ref<CommandType | null>(null)
@@ -309,11 +315,11 @@ function isCtxActiveOption(optValue: string): boolean {
 
 <template>
   <div class="data-table-container" @click="hideContextMenu">
-    <div v-if="!selectedConnectionId" class="empty-state">选择一个连接查看数据</div>
+    <div v-if="!selectedConnectionId" class="empty-state">{{ t('table.chooseConnection') }}</div>
     <template v-else>
       <div class="table-header">
         <span class="header-title">{{ categoryTitle }}</span>
-        <input v-model="searchFilter" class="search-input" type="text" placeholder="搜索 IOA / 类型..." />
+        <input v-model="searchFilter" class="search-input" type="text" :placeholder="t('table.searchPlaceholder')" />
         <span class="point-count">{{ pointCountLabel }}</span>
       </div>
 
@@ -323,10 +329,10 @@ function isCtxActiveOption(optValue: string): boolean {
           <thead>
             <tr>
               <th class="col-ioa">IOA</th>
-              <th class="col-type">类型</th>
-              <th class="col-value">值</th>
-              <th class="col-quality">品质</th>
-              <th class="col-timestamp">时间戳</th>
+              <th class="col-type">{{ t('table.type') }}</th>
+              <th class="col-value">{{ t('table.value') }}</th>
+              <th class="col-quality">{{ t('table.quality') }}</th>
+              <th class="col-timestamp">{{ t('table.timestamp') }}</th>
             </tr>
           </thead>
         </table>
@@ -350,7 +356,7 @@ function isCtxActiveOption(optValue: string): boolean {
             </tbody>
           </table>
         </div>
-        <div v-else class="empty-hint-inline">暂无数据，请先发送总召唤</div>
+        <div v-else class="empty-hint-inline">{{ t('table.noDataHint') }}</div>
       </div>
     </template>
 
@@ -380,15 +386,15 @@ function isCtxActiveOption(optValue: string): boolean {
       </template>
       <template v-else-if="ctxControlConfig">
         <!-- Setpoint types: open dialog -->
-        <div class="ctx-item" @click="ctxOpenControlDialog">设定值...</div>
+        <div class="ctx-item" @click="ctxOpenControlDialog">{{ t('table.setpoint') }}</div>
         <div class="ctx-divider"></div>
       </template>
       <!-- Copy actions (always available) -->
-      <div class="ctx-item" @click="ctxCopy(String(contextMenu.point?.ioa ?? ''))">复制 IOA</div>
-      <div class="ctx-item" @click="ctxCopy(contextMenu.point?.value ?? '')">复制值</div>
+      <div class="ctx-item" @click="ctxCopy(String(contextMenu.point?.ioa ?? ''))">{{ t('table.copyIoa') }}</div>
+      <div class="ctx-item" @click="ctxCopy(contextMenu.point?.value ?? '')">{{ t('table.copyValue') }}</div>
       <template v-if="ctxControlConfig">
         <div class="ctx-divider"></div>
-        <div class="ctx-item" @click="ctxOpenControlDialog">自由控制...</div>
+        <div class="ctx-item" @click="ctxOpenControlDialog">{{ t('table.freeControl') }}</div>
       </template>
     </div>
 

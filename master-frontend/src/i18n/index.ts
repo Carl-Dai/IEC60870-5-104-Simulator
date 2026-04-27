@@ -70,3 +70,22 @@ export function __resetForTests() {
 }
 
 export type { Locale }
+
+// Backend-stable Chinese category labels -> dictionary keys.
+// Used to translate `ReceivedDataPointInfo.category` (which carries the Chinese
+// label as a stable ID from the Rust core) for display.
+const CATEGORY_LABEL_TO_KEY: Record<string, string> = {
+  '单点 (SP)': 'single_point',
+  '双点 (DP)': 'double_point',
+  '步位置 (ST)': 'step_position',
+  '位串 (BO)': 'bitstring',
+  '归一化 (ME_NA)': 'normalized_measured',
+  '标度化 (ME_NB)': 'scaled_measured',
+  '浮点 (ME_NC)': 'float_measured',
+  '累计量 (IT)': 'integrated_totals',
+}
+
+export function localizeCategoryLabel(label: string): string {
+  const key = CATEGORY_LABEL_TO_KEY[label]
+  return key ? translate(`category.${key}`) : label
+}

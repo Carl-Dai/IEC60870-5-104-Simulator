@@ -2,6 +2,9 @@
 import { ref, watch, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { CommandType, ControlResult } from '../types'
+import { useI18n } from '../i18n'
+
+const { t } = useI18n()
 
 interface Props {
   visible: boolean
@@ -18,11 +21,17 @@ const emit = defineEmits<{
 }>()
 
 const ioa = ref<number>(0)
+const ca = ref<number>(1)
 const commandType = ref<CommandType>('single')
 const selectMode = ref(false)
 const errorMsg = ref('')
 const sending = ref(false)
 const lastResult = ref<ControlResult | null>(null)
+
+// Advanced parameters
+const showAdvanced = ref(false)
+const qualifier = ref<number>(0)
+const cot = ref<number>(6)
 
 // Value state per type
 const singleValue = ref('true')
@@ -31,15 +40,24 @@ const stepValue = ref('2')
 const normalizedValue = ref('0.0')
 const scaledValue = ref('0')
 const floatValue = ref('0.0')
+const bitstringValue = ref<number>(0)
 
 watch(() => props.visible, (v) => {
   if (v) {
     errorMsg.value = ''
     sending.value = false
     lastResult.value = null
+    qualifier.value = 0
+    cot.value = 6
+    showAdvanced.value = false
+    ca.value = props.commonAddress
     if (props.prefillIoa != null) ioa.value = props.prefillIoa
     if (props.prefillCommandType) commandType.value = props.prefillCommandType
   }
+})
+
+watch(commandType, () => {
+  qualifier.value = 0
 })
 
 const currentValueStr = computed(() => {
@@ -50,17 +68,36 @@ const currentValueStr = computed(() => {
     case 'setpoint_normalized': return normalizedValue.value
     case 'setpoint_scaled': return scaledValue.value
     case 'setpoint_float': return floatValue.value
+    case 'bitstring': return String(bitstringValue.value)
   }
 })
 
-const COMMAND_TYPES: { value: CommandType; label: string }[] = [
-  { value: 'single', label: '单点命令 (C_SC_NA_1)' },
-  { value: 'double', label: '双点命令 (C_DC_NA_1)' },
-  { value: 'step', label: '步调节命令 (C_RC_NA_1)' },
-  { value: 'setpoint_normalized', label: '归一化设定值 (C_SE_NA_1)' },
-  { value: 'setpoint_scaled', label: '标度化设定值 (C_SE_NB_1)' },
-  { value: 'setpoint_float', label: '浮点设定值 (C_SE_NC_1)' },
-]
+const qualifierHint = computed(() => {
+  switch (commandType.value) {
+    case 'single':
+    case 'double':
+    case 'step':
+      return t('control.qulqlSingle')
+    case 'setpoint_normalized':
+    case 'setpoint_scaled':
+    case 'setpoint_float':
+      return t('control.qulqlSetpoint')
+    case 'bitstring':
+      return t('control.qulqlBitstring')
+  }
+})
+
+const isBitstring = computed(() => commandType.value === 'bitstring')
+
+const commandTypes = computed<{ value: CommandType; label: string }[]>(() => [
+  { value: 'single', label: t('control.cmdSingle') },
+  { value: 'double', label: t('control.cmdDouble') },
+  { value: 'step', label: t('control.cmdStep') },
+  { value: 'setpoint_normalized', label: t('control.cmdSetNorm') },
+  { value: 'setpoint_scaled', label: t('control.cmdSetScaled') },
+  { value: 'setpoint_float', label: t('control.cmdSetFloat') },
+  { value: 'bitstring', label: t('control.cmdBitstring') },
+])
 
 async function send() {
   if (!props.connectionId) return
@@ -69,16 +106,20 @@ async function send() {
   lastResult.value = null
 
   try {
-    const result = await invoke<ControlResult>('send_control_command', {
-      request: {
-        connection_id: props.connectionId,
-        ioa: ioa.value,
-        common_address: props.commonAddress,
-        command_type: commandType.value,
-        value: currentValueStr.value,
-        select: selectMode.value,
-      }
-    })
+    const payload: Record<string, unknown> = {
+      connection_id: props.connectionId,
+      ioa: ioa.value,
+      common_address: ca.value,
+      command_type: commandType.value,
+      value: currentValueStr.value,
+      select: selectMode.value,
+      qualifier: qualifier.value,
+      cot: cot.value,
+    }
+    if (isBitstring.value) {
+      payload.bitstring = bitstringValue.value >>> 0
+    }
+    const result = await invoke<ControlResult>('send_control_command', { request: payload })
     lastResult.value = result
     sending.value = false
     emit('sent')
@@ -101,38 +142,44 @@ function handleKeydown(e: KeyboardEvent) {
   <Teleport to="body">
     <div v-if="visible" class="modal-backdrop" @mousedown.self="emit('close')" @keydown="handleKeydown">
       <div class="modal-box">
-        <div class="modal-title">发送控制命令</div>
+        <div class="modal-title">{{ t('control.title') }}</div>
         <div class="modal-body">
-          <label class="form-label">
-            IOA (信息对象地址)
-            <input v-model.number="ioa" class="form-input" type="number" min="0" max="16777215" />
-          </label>
+          <div class="form-row">
+            <label class="form-label form-label-half">
+              {{ t('control.targetCa') }}
+              <input v-model.number="ca" class="form-input" type="number" min="1" max="65534" />
+            </label>
+            <label class="form-label form-label-half">
+              {{ t('control.ioa') }}
+              <input v-model.number="ioa" class="form-input" type="number" min="0" max="16777215" />
+            </label>
+          </div>
 
           <label class="form-label">
-            命令类型
+            {{ t('control.commandType') }}
             <select v-model="commandType" class="form-input">
-              <option v-for="ct in COMMAND_TYPES" :key="ct.value" :value="ct.value">{{ ct.label }}</option>
+              <option v-for="ct in commandTypes" :key="ct.value" :value="ct.value">{{ ct.label }}</option>
             </select>
           </label>
 
           <!-- Single point: toggle -->
           <div v-if="commandType === 'single'" class="ctrl-buttons">
-            <button :class="['ctrl-btn', { active: singleValue === 'false' }]" @click="singleValue = 'false'">分闸 OFF</button>
-            <button :class="['ctrl-btn', { active: singleValue === 'true' }]" @click="singleValue = 'true'">合闸 ON</button>
+            <button :class="['ctrl-btn', { active: singleValue === 'false' }]" @click="singleValue = 'false'">{{ t('control.optOff') }}</button>
+            <button :class="['ctrl-btn', { active: singleValue === 'true' }]" @click="singleValue = 'true'">{{ t('control.optOn') }}</button>
           </div>
 
           <!-- Double point: 4 buttons -->
           <div v-else-if="commandType === 'double'" class="ctrl-buttons">
-            <button :class="['ctrl-btn ctrl-btn-sm', { active: doubleValue === '0' }]" @click="doubleValue = '0'">中间</button>
-            <button :class="['ctrl-btn ctrl-btn-sm', { active: doubleValue === '1' }]" @click="doubleValue = '1'">分</button>
-            <button :class="['ctrl-btn ctrl-btn-sm', { active: doubleValue === '2' }]" @click="doubleValue = '2'">合</button>
-            <button :class="['ctrl-btn ctrl-btn-sm', { active: doubleValue === '3' }]" @click="doubleValue = '3'">不确定</button>
+            <button :class="['ctrl-btn ctrl-btn-sm', { active: doubleValue === '0' }]" @click="doubleValue = '0'">{{ t('control.optIntermediate') }}</button>
+            <button :class="['ctrl-btn ctrl-btn-sm', { active: doubleValue === '1' }]" @click="doubleValue = '1'">{{ t('control.optOpen') }}</button>
+            <button :class="['ctrl-btn ctrl-btn-sm', { active: doubleValue === '2' }]" @click="doubleValue = '2'">{{ t('control.optClose') }}</button>
+            <button :class="['ctrl-btn ctrl-btn-sm', { active: doubleValue === '3' }]" @click="doubleValue = '3'">{{ t('control.optInvalid') }}</button>
           </div>
 
           <!-- Step: up/down -->
           <div v-else-if="commandType === 'step'" class="ctrl-buttons">
-            <button :class="['ctrl-btn', { active: stepValue === '1' }]" @click="stepValue = '1'">&#9660; 降</button>
-            <button :class="['ctrl-btn', { active: stepValue === '2' }]" @click="stepValue = '2'">&#9650; 升</button>
+            <button :class="['ctrl-btn', { active: stepValue === '1' }]" @click="stepValue = '1'">&#9660; {{ t('control.optStepDown') }}</button>
+            <button :class="['ctrl-btn', { active: stepValue === '2' }]" @click="stepValue = '2'">&#9650; {{ t('control.optStepUp') }}</button>
           </div>
 
           <!-- Normalized: slider + input -->
@@ -145,23 +192,56 @@ function handleKeydown(e: KeyboardEvent) {
 
           <!-- Scaled: integer input -->
           <label v-else-if="commandType === 'setpoint_scaled'" class="form-label">
-            值 (-32768 ~ 32767)
+            {{ t('control.valueRangeScaled') }}
             <input v-model="scaledValue" class="form-input" type="number" min="-32768" max="32767" step="1" />
           </label>
 
           <!-- Float: number input -->
           <label v-else-if="commandType === 'setpoint_float'" class="form-label">
-            值
+            {{ t('control.valueLabel') }}
             <input v-model="floatValue" class="form-input" type="number" step="0.1" />
           </label>
 
-          <div class="toggle-row">
-            <label class="toggle-label">
-              <input type="checkbox" v-model="selectMode" class="toggle-checkbox" />
-              <span>选择-执行 (SbO)</span>
+          <!-- Bitstring: 32-bit unsigned -->
+          <div v-else-if="commandType === 'bitstring'" class="bitstring-control">
+            <label class="form-label">
+              {{ t('control.valueRangeBitstring') }}
+              <input v-model.number="bitstringValue" class="form-input" type="number" min="0" :max="0xFFFFFFFF" step="1" />
             </label>
-            <span class="toggle-hint">{{ selectMode ? '自动两步' : '直接执行' }}</span>
+            <div class="bitstring-hex">{{ t('control.bitstringHex') }}: 0x{{ ((bitstringValue >>> 0).toString(16).toUpperCase().padStart(8, '0')) }}</div>
           </div>
+
+          <div class="toggle-row">
+            <label class="toggle-label" :class="{ 'is-disabled': isBitstring }">
+              <input type="checkbox" v-model="selectMode" class="toggle-checkbox" :disabled="isBitstring" />
+              <span>{{ t('control.sboLabel') }}</span>
+            </label>
+            <span class="toggle-hint">{{ isBitstring ? t('control.bitstringNoSbo') : (selectMode ? t('control.sboTwoStep') : t('control.sboDirect')) }}</span>
+          </div>
+
+          <details class="advanced" :open="showAdvanced" @toggle="showAdvanced = ($event.target as HTMLDetailsElement).open">
+            <summary class="advanced-summary">{{ t('control.advancedSummary') }}</summary>
+            <div class="advanced-body">
+              <label class="form-label">
+                {{ isBitstring ? t('control.qulqlIgnored') : t('control.qulqlLabel') }}
+                <input v-model.number="qualifier" class="form-input" type="number" min="0" max="127" :disabled="isBitstring" />
+                <span class="hint">{{ qualifierHint }}</span>
+              </label>
+              <label class="form-label">
+                {{ t('control.cotLabel') }}
+                <div class="cot-row">
+                  <input v-model.number="cot" class="form-input cot-input" type="number" min="0" max="63" />
+                  <select class="form-input cot-preset" @change="cot = Number(($event.target as HTMLSelectElement).value)">
+                    <option value="6">{{ t('control.cot6') }}</option>
+                    <option value="7">{{ t('control.cot7') }}</option>
+                    <option value="8">{{ t('control.cot8') }}</option>
+                    <option value="9">{{ t('control.cot9') }}</option>
+                    <option value="10">{{ t('control.cot10') }}</option>
+                  </select>
+                </div>
+              </label>
+            </div>
+          </details>
 
           <div v-if="errorMsg" class="error-msg">{{ errorMsg }}</div>
 
@@ -173,9 +253,9 @@ function handleKeydown(e: KeyboardEvent) {
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-secondary" @click="emit('close')">关闭</button>
+          <button class="btn btn-secondary" @click="emit('close')">{{ t('common.close') }}</button>
           <button class="btn btn-primary" :disabled="sending" @click="send">
-            {{ sending ? '发送中...' : '发送' }}
+            {{ sending ? t('control.sending') : t('control.send') }}
           </button>
         </div>
       </div>
@@ -230,6 +310,76 @@ function handleKeydown(e: KeyboardEvent) {
   gap: 4px;
   font-size: 12px;
   color: #6c7086;
+}
+
+.form-row {
+  display: flex;
+  gap: 8px;
+}
+
+.form-label-half {
+  flex: 1;
+}
+
+.bitstring-control {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bitstring-hex {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: #89b4fa;
+  padding-left: 2px;
+}
+
+.advanced {
+  border: 1px solid #313244;
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+
+.advanced-summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #cdd6f4;
+  user-select: none;
+}
+
+.advanced-summary:hover {
+  color: #89b4fa;
+}
+
+.advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.hint {
+  font-size: 10px;
+  color: #6c7086;
+  line-height: 1.4;
+}
+
+.cot-row {
+  display: flex;
+  gap: 6px;
+}
+
+.cot-input {
+  width: 80px;
+}
+
+.cot-preset {
+  flex: 1;
+}
+
+.toggle-label.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .form-input {
