@@ -1,6 +1,6 @@
 [package]
 name = "iec104sim-core"
-version = "1.0.7"
+version = "1.0.8"
 edition = "2021"
 
 [dependencies]

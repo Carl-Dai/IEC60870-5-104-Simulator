@@ -2,7 +2,7 @@
 
 本项目的所有重要变更记录在此文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.0.8] - 2026-04-28
 
 ### 新增
 - **主站 + 从站**:UI 支持中英文运行时切换。工具栏右侧 `中 / EN` 按钮一键切换;首次启动跟随系统语言(`navigator.language` 以 `zh` 开头则中文,否则英文),用户切换后通过 `localStorage` 持久化。

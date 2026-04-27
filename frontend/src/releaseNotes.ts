@@ -4,5 +4,7 @@ export const RELEASES_URL = 'https://github.com/kelsoprotein-lab/IEC104Sim/relea
 
 // Keep in sync with CHANGELOG.md — see `release` skill.
 export const RELEASE_NOTES: string[] = [
-  '本版本主要为主站 (IEC104 Master) 新增连接后自动总召唤与 TLS 证书路径默认值,从站端无功能变化',
+  '新增: UI 支持中英文运行时切换 (工具栏 中/EN 按钮一键切换,首次启动跟随系统语言并持久化)',
+  '新增: 日志 CSV 导出改前端实现,跟随当前 UI 语言',
+  '改进: 默认站名不再硬编码,前端按当前语言渲染 ("站 1" / "Station 1")',
 ]
