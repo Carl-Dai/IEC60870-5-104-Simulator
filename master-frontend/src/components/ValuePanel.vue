@@ -3,6 +3,9 @@ import { inject, computed, ref, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { ReceivedDataPointInfo, ControlResult } from '../types'
 import { getControlConfig } from '../types'
+import { useI18n, localizeCategoryLabel } from '../i18n'
+
+const { t } = useI18n()
 const selectedConnectionId = inject<Ref<string | null>>('selectedConnectionId')!
 const selectedPoints = inject<Ref<ReceivedDataPointInfo[]>>('selectedPoints')!
 
@@ -32,7 +35,7 @@ async function getCommonAddress(): Promise<number> {
   return conn?.common_address ?? 1
 }
 
-async function sendCommand(value: string) {
+async function sendCommand(value: string | number | boolean) {
   if (!selectedConnectionId.value || !firstPoint.value || !controlConfig.value) return
   sending.value = true
   lastResult.value = null
@@ -45,7 +48,7 @@ async function sendCommand(value: string) {
         ioa: firstPoint.value.ioa,
         common_address: ca,
         command_type: controlConfig.value.commandType,
-        value: value,
+        value: String(value),
         select: cmdSelect.value,
       }
     })
@@ -97,42 +100,42 @@ watch(firstPoint, (p) => {
 
 <template>
   <div class="value-panel">
-    <div class="panel-header">数据详情</div>
+    <div class="panel-header">{{ t('valuePanel.title') }}</div>
 
     <div v-if="!hasSelection" class="empty-state">
-      选择数据点查看详情
+      {{ t('valuePanel.selectPointHint') }}
     </div>
 
     <template v-else>
       <!-- Selected point details -->
       <div class="detail-section">
-        <div class="section-title">选中数据点</div>
+        <div class="section-title">{{ t('valuePanel.selectedPoint') }}</div>
         <div v-for="point in selectedPoints" :key="point.ioa" class="detail-item">
           <div class="detail-row">
             <span class="detail-label">IOA</span>
             <span class="detail-value mono">{{ point.ioa }}</span>
           </div>
           <div class="detail-row">
-            <span class="detail-label">类型</span>
+            <span class="detail-label">{{ t('valuePanel.type') }}</span>
             <span class="detail-value mono">{{ point.asdu_type }}</span>
           </div>
           <div class="detail-row">
-            <span class="detail-label">分类</span>
-            <span class="detail-value">{{ point.category }}</span>
+            <span class="detail-label">{{ t('valuePanel.category') }}</span>
+            <span class="detail-value">{{ localizeCategoryLabel(point.category) }}</span>
           </div>
           <div class="detail-row">
-            <span class="detail-label">值</span>
+            <span class="detail-label">{{ t('valuePanel.value') }}</span>
             <span class="detail-value mono">{{ point.value }}</span>
           </div>
           <div class="detail-row">
-            <span class="detail-label">品质</span>
+            <span class="detail-label">{{ t('valuePanel.quality') }}</span>
             <span :class="['detail-value', point.quality_iv ? 'text-red' : 'text-green']">
-              {{ point.quality_iv ? 'IV (无效)' : 'OK (有效)' }}
+              {{ point.quality_iv ? t('valuePanel.qualityInvalid') : t('valuePanel.qualityValid') }}
             </span>
           </div>
           <div class="detail-row">
-            <span class="detail-label">时间戳</span>
-            <span class="detail-value mono">{{ point.timestamp ?? '无' }}</span>
+            <span class="detail-label">{{ t('valuePanel.timestamp') }}</span>
+            <span class="detail-value mono">{{ point.timestamp ?? t('valuePanel.timestampNone') }}</span>
           </div>
           <div v-if="selectedPoints.length > 1" class="detail-divider"></div>
         </div>
@@ -140,7 +143,7 @@ watch(firstPoint, (p) => {
 
       <!-- Smart control section -->
       <div v-if="controlConfig" class="control-section">
-        <div class="section-title">快捷控制 - {{ controlConfig.label }}</div>
+        <div class="section-title">{{ t('valuePanel.quickControl') }} - {{ controlConfig.label }}</div>
 
         <div class="control-form">
           <!-- Toggle (single point) -->
@@ -207,7 +210,7 @@ watch(firstPoint, (p) => {
               :disabled="sending || !selectedConnectionId"
               @click="sendSetpoint"
             >
-              发送设定值
+              {{ t('valuePanel.sendSetpoint') }}
             </button>
           </div>
 
@@ -227,7 +230,7 @@ watch(firstPoint, (p) => {
               :disabled="sending || !selectedConnectionId"
               @click="sendSetpoint"
             >
-              发送设定值
+              {{ t('valuePanel.sendSetpoint') }}
             </button>
           </div>
 
@@ -235,9 +238,9 @@ watch(firstPoint, (p) => {
           <div class="toggle-row">
             <label class="toggle-label">
               <input type="checkbox" v-model="cmdSelect" class="toggle-checkbox" />
-              <span>选择-执行 (SbO)</span>
+              <span>{{ t('valuePanel.sboLabel') }}</span>
             </label>
-            <span class="toggle-hint">{{ cmdSelect ? '自动两步' : '直接执行' }}</span>
+            <span class="toggle-hint">{{ cmdSelect ? t('valuePanel.sboTwoStep') : t('valuePanel.sboDirect') }}</span>
           </div>
 
           <!-- Control result indicator -->
@@ -261,7 +264,7 @@ watch(firstPoint, (p) => {
       </div>
 
       <div v-else-if="firstPoint" class="no-control-hint">
-        此类型不支持控制操作
+        {{ t('valuePanel.notControllable') }}
       </div>
     </template>
   </div>

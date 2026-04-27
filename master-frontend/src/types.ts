@@ -31,7 +31,30 @@ export interface LogEntry {
   raw_bytes: number[] | null
 }
 
-export type CommandType = 'single' | 'double' | 'step' | 'setpoint_normalized' | 'setpoint_scaled' | 'setpoint_float'
+export type CommandType = 'single' | 'double' | 'step' | 'setpoint_normalized' | 'setpoint_scaled' | 'setpoint_float' | 'bitstring'
+
+export interface ControlCommandRequest {
+  connection_id: string
+  ioa: number
+  common_address: number
+  command_type: CommandType
+  value: string
+  select?: boolean
+  qualifier?: number
+  cot?: number
+  bitstring?: number
+}
+
+export interface RawApduRequest {
+  connection_id: string
+  hex_payload: string
+}
+
+export interface RawSendResult {
+  sent_hex: string
+  byte_len: number
+  timestamp: string
+}
 
 export interface ControlStep {
   action: string
@@ -60,62 +83,73 @@ export interface ControlConfig {
   step?: number
 }
 
-const CONTROL_CONFIG_MAP: Record<string, ControlConfig | null> = {
-  '单点 (SP)': {
-    commandType: 'single',
-    label: '单点命令 C_SC_NA_1',
-    widget: 'toggle',
-    options: [
-      { label: '分闸 OFF', value: 'false' },
-      { label: '合闸 ON', value: 'true' },
-    ],
-  },
-  '双点 (DP)': {
-    commandType: 'double',
-    label: '双点命令 C_DC_NA_1',
-    widget: 'button_group',
-    options: [
-      { label: '中间', value: '0' },
-      { label: '分', value: '1' },
-      { label: '合', value: '2' },
-      { label: '不确定', value: '3' },
-    ],
-  },
-  '步位置 (ST)': {
-    commandType: 'step',
-    label: '步调节命令 C_RC_NA_1',
-    widget: 'step_buttons',
-    options: [
-      { label: '降', value: '1' },
-      { label: '升', value: '2' },
-    ],
-  },
-  '归一化 (ME_NA)': {
-    commandType: 'setpoint_normalized',
-    label: '归一化设定值 C_SE_NA_1',
-    widget: 'slider',
-    min: -1.0,
-    max: 1.0,
-    step: 0.001,
-  },
-  '标度化 (ME_NB)': {
-    commandType: 'setpoint_scaled',
-    label: '标度化设定值 C_SE_NB_1',
-    widget: 'number_input',
-    min: -32768,
-    max: 32767,
-    step: 1,
-  },
-  '浮点 (ME_NC)': {
-    commandType: 'setpoint_float',
-    label: '浮点设定值 C_SE_NC_1',
-    widget: 'number_input',
-    step: 0.1,
-  },
-  '位串 (BO)': null,
-  '累计量 (IT)': null,
-}
+import { useI18n } from './i18n'
 
 export function getControlConfig(category: string): ControlConfig | null {
-  return CONTROL_CONFIG_MAP[category] ?? null
+  const { t } = useI18n()
+  switch (category) {
+    case '单点 (SP)':
+      return {
+        commandType: 'single',
+        label: t('control.cmdSingle'),
+        widget: 'toggle',
+        options: [
+          { label: t('control.optOff'), value: 'false' },
+          { label: t('control.optOn'), value: 'true' },
+        ],
+      }
+    case '双点 (DP)':
+      return {
+        commandType: 'double',
+        label: t('control.cmdDouble'),
+        widget: 'button_group',
+        options: [
+          { label: t('control.optIntermediate'), value: '0' },
+          { label: t('control.optOpen'), value: '1' },
+          { label: t('control.optClose'), value: '2' },
+          { label: t('control.optInvalid'), value: '3' },
+        ],
+      }
+    case '步位置 (ST)':
+      return {
+        commandType: 'step',
+        label: t('control.cmdStep'),
+        widget: 'step_buttons',
+        options: [
+          { label: t('control.optStepDown'), value: '1' },
+          { label: t('control.optStepUp'), value: '2' },
+        ],
+      }
+    case '归一化 (ME_NA)':
+      return {
+        commandType: 'setpoint_normalized',
+        label: t('control.cmdSetNorm'),
+        widget: 'slider',
+        min: -1.0, max: 1.0, step: 0.001,
+      }
+    case '标度化 (ME_NB)':
+      return {
+        commandType: 'setpoint_scaled',
+        label: t('control.cmdSetScaled'),
+        widget: 'number_input',
+        min: -32768, max: 32767, step: 1,
+      }
+    case '浮点 (ME_NC)':
+      return {
+        commandType: 'setpoint_float',
+        label: t('control.cmdSetFloat'),
+        widget: 'number_input',
+        step: 0.1,
+      }
+    case '位串 (BO)':
+      return {
+        commandType: 'bitstring',
+        label: t('control.cmdBitstring'),
+        widget: 'number_input',
+        min: 0, max: 0xFFFFFFFF, step: 1,
+      }
+    case '累计量 (IT)':
+    default:
+      return null
+  }
 }
