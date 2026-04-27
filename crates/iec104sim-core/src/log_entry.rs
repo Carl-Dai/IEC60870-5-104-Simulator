@@ -1,5 +1,15 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+
+/// Structured detail payload for frontend localization.
+/// When present alongside `LogEntry.detail`, the frontend renders
+/// `t("log.{kind}", payload)` instead of the raw `detail` string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetailEvent {
+    pub kind: String,
+    pub payload: JsonValue,
+}
 
 /// Direction of the IEC 104 communication frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +70,10 @@ pub enum FrameLabel {
     SetpointScaled,
     /// Setpoint float
     SetpointFloat,
+    /// Bitstring 32-bit command (C_BO_NA_1)
+    Bitstring,
+    /// User-supplied raw APDU
+    RawApdu,
     /// Connection event
     ConnectionEvent,
 }
@@ -85,6 +99,8 @@ impl FrameLabel {
             Self::SetpointNormalized => "C_SE_NA".to_string(),
             Self::SetpointScaled => "C_SE_NB".to_string(),
             Self::SetpointFloat => "C_SE_NC".to_string(),
+            Self::Bitstring => "C_BO".to_string(),
+            Self::RawApdu => "RAW".to_string(),
             Self::ConnectionEvent => "CONN".to_string(),
         }
     }
@@ -99,11 +115,18 @@ pub struct LogEntry {
     pub direction: Direction,
     /// Frame type label.
     pub frame_label: FrameLabel,
-    /// Human-readable detail description.
+    /// Human-readable detail description (legacy). The frontend prefers
+    /// `detail_event` when present; this field remains as a fallback for
+    /// CSV export, CLI consumers, and entries that don't carry structured data.
     pub detail: String,
     /// Raw bytes of the frame (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_bytes: Option<Vec<u8>>,
+    /// Structured payload for frontend i18n. When present, the frontend
+    /// renders `t("log.{kind}", payload)` so the detail text follows the
+    /// current UI locale (and updates when the user switches languages).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub detail_event: Option<DetailEvent>,
 }
 
 impl LogEntry {
@@ -115,6 +138,7 @@ impl LogEntry {
             frame_label,
             detail: detail.into(),
             raw_bytes: None,
+            detail_event: None,
         }
     }
 
@@ -131,7 +155,14 @@ impl LogEntry {
             frame_label,
             detail: detail.into(),
             raw_bytes: Some(raw_bytes),
+            detail_event: None,
         }
+    }
+
+    /// Attach a structured detail event for frontend localization.
+    pub fn with_detail_event(mut self, kind: impl Into<String>, payload: JsonValue) -> Self {
+        self.detail_event = Some(DetailEvent { kind: kind.into(), payload });
+        self
     }
 
     /// Format for CSV export.
@@ -179,5 +210,33 @@ mod tests {
         assert!(row.contains("TX"));
         assert!(row.contains("GI"));
         assert!(row.contains("GI CA=1"));
+    }
+
+    #[test]
+    fn test_log_entry_with_detail_event() {
+        use serde_json::json;
+        let entry = LogEntry::new(Direction::Tx, FrameLabel::SingleCommand, "ignored")
+            .with_detail_event("single_command", json!({ "ioa": 100, "val": true }));
+        let event = entry.detail_event.as_ref().expect("detail_event present");
+        assert_eq!(event.kind, "single_command");
+        assert_eq!(event.payload["ioa"], 100);
+        assert_eq!(event.payload["val"], true);
+    }
+
+    #[test]
+    fn test_log_entry_serializes_detail_event() {
+        use serde_json::json;
+        let entry = LogEntry::new(Direction::Tx, FrameLabel::SingleCommand, "x")
+            .with_detail_event("single_command", json!({ "ioa": 1 }));
+        let s = serde_json::to_string(&entry).unwrap();
+        assert!(s.contains("\"detail_event\""));
+        assert!(s.contains("\"kind\":\"single_command\""));
+    }
+
+    #[test]
+    fn test_log_entry_omits_detail_event_when_none() {
+        let entry = LogEntry::new(Direction::Rx, FrameLabel::GeneralInterrogation, "GI");
+        let s = serde_json::to_string(&entry).unwrap();
+        assert!(!s.contains("detail_event"));
     }
 }
