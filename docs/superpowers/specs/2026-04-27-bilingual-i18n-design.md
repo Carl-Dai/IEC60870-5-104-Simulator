@@ -34,6 +34,7 @@
 - Tauri 后端 tracing 日志本地化 (开发/运维查看，固定英文即可)
 - README / CHANGELOG / 应用元数据本地化 (已存在双语 README，不变更)
 - 后端日志文件持久化的语言
+- 核心库 `crates/iec104sim-core` 中类型/分类的中文显示字符串（如 `Category::SinglePoint.as_text()` 返回 `"单点 (SP)"`）。这些字符串仍作为后端可识别的稳定 ID 跨进程传输；前端字典将以这些中文字符串作为 key 直接做映射（中文 locale 返回原值，英文 locale 返回翻译）。这样可避免改动核心库及其 CLI / 测试用法
 
 ## 决策摘要
 
