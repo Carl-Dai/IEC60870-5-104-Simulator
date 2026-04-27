@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { dialogKey } from '../composables/useDialog'
 import type { showAlert as ShowAlert } from '../composables/useDialog'
 import AboutDialog from './AboutDialog.vue'
+import LangSwitch from './LangSwitch.vue'
 
 const { showAlert } = inject<{ showAlert: typeof ShowAlert }>(dialogKey)!
 const selectedConnectionId = inject<Ref<string | null>>('selectedConnectionId')!
@@ -219,6 +220,7 @@ const hasConnection = () => selectedConnectionId.value !== null
     </div>
 
     <div class="toolbar-spacer"></div>
+    <LangSwitch />
     <button class="toolbar-title as-button" @click="showAbout = true" title="关于">
       IEC104 Master
     </button>
