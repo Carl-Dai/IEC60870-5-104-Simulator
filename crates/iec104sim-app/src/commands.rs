@@ -68,8 +68,8 @@ pub async fn create_server(
 
     // Auto-create default station (CA=1) with pre-filled data points
     let default_station = match request.init_mode.as_deref() {
-        Some("random") => Station::with_random_points(1, "站 1", 10),
-        _ => Station::with_default_points(1, "站 1", 10),
+        Some("random") => Station::with_random_points(1, "", 10),
+        _ => Station::with_default_points(1, "", 10),
     };
     server
         .add_station(default_station)

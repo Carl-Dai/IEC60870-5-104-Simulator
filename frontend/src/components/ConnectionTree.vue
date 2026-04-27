@@ -222,7 +222,7 @@ function isCategorySelected(ts: TreeServer, tst: TreeStation, category: string):
             @contextmenu.prevent="showContextMenuForStation($event, ts, tst)"
           >
             <span class="node-arrow" @click.stop="toggleStation(tst)">{{ tst.expanded ? '\u25BC' : '\u25B6' }}</span>
-            <span class="node-label">{{ tst.station.name || `CA=${tst.station.common_address}` }}</span>
+            <span class="node-label">{{ tst.station.name || t('station.defaultName', { ca: tst.station.common_address }) }}</span>
             <span class="node-badge">{{ tst.station.point_count }}</span>
           </div>
 
