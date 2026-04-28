@@ -2,6 +2,15 @@
 
 本项目的所有重要变更记录在此文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.0.9] - 2026-04-28
+
+### 新增
+- **主站 + 从站**: 应用内自动更新。启动后 2 秒静默检查 GitHub Releases,发现新版本时弹窗显示更新说明并允许一键下载、ed25519 验签后自动重启。6 小时内不重复检查;用户点"稍后"则该版本 24 小时内不再提示。
+- **CI**: release workflow 现在会同时签名安装包(`*.sig`)并生成 `latest-slave.json` / `latest-master.json` 两份 manifest 上传到 release,作为 updater 客户端的 endpoint。
+
+### 注意
+- v1.0.8 及更早版本的用户**需要手动升级一次**到 v1.0.9。从 v1.0.9 开始,后续版本将自动收到更新提示。
+
 ## [1.0.8] - 2026-04-28
 
 ### 新增

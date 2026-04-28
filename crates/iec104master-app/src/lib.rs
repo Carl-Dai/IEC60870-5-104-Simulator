@@ -1,11 +1,15 @@
 mod commands;
 mod state;
+pub mod update;
 
 use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_store::Builder::new().build())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             // Connection commands
@@ -26,6 +30,10 @@ pub fn run() {
             commands::get_communication_logs,
             commands::clear_communication_logs,
             commands::export_logs_csv,
+            // Update commands
+            update::check_for_update,
+            update::install_update,
+            update::snooze_update,
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {

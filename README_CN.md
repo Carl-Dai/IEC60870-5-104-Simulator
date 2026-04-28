@@ -106,6 +106,11 @@ cargo tauri dev
 
 最新变更请参见 [CHANGELOG.md](CHANGELOG.md) 或 [Releases 页面](https://github.com/kelsoprotein-lab/IEC104Sim/releases)。
 
+### 自动更新
+
+从 v1.0.9 起，两个应用在启动时自动检测 GitHub Releases，发现新版本会弹窗提示安装。
+v1.0.8 及更早版本的用户需要手动升级一次到 v1.0.9，之后将自动收到后续更新。
+
 ## 许可证
 
 MIT
