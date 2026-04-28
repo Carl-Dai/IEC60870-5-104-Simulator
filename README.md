@@ -8,6 +8,25 @@
 
 A cross-platform IEC 60870-5-104 protocol simulator built with **Rust** + **Tauri 2** + **Vue 3**, featuring both a Slave (server) and Master (client) application.
 
+## Screenshots
+
+### Master · multi-CA on one TCP link
+
+One IEC 104 master connection can talk to several stations (Common Addresses) at once.
+Configure the CA list as `1, 2, 3` in the **New Connection** dialog and the connection tree
+automatically expands to **Connection → CA badge → category**, with per-CA point counts —
+so two stations sharing the same IOA never collide on screen.
+
+![Master multi-CA tree + new connection dialog](docs/screenshots/master-multi-ca-newconn.png)
+
+### Master · communication log with TLS handshake & per-CA GI
+
+The bottom log panel shows every TLS handshake step, U/I/S frame, COT decode, and the raw
+hex bytes side-by-side. Here the master sends **GI CA=1** and **GI CA=2** in sequence and
+receives the spontaneous response stream from each station.
+
+![Master communication log with TLS + multi-CA GI](docs/screenshots/master-multi-ca-comm-log.png)
+
 ## Download
 
 Pre-built installers for Windows, macOS, and Linux are available on the [Releases](https://github.com/kelsoprotein-lab/IEC104Sim/releases) page.
@@ -30,13 +49,26 @@ Pre-built installers for Windows, macOS, and Linux are available on the [Release
 ### Master (IEC104Master)
 
 - **IEC 104 client** with TCP and TLS support
+- **Multi-CA per connection**: drive 1..N Common Addresses over a single TCP link.
+  Auto-GI / Clock Sync / Counter Read fan out to every CA; data is stored
+  per-CA so colliding IOAs from different stations stay separate.
+- **Three-level connection tree** for multi-CA setups (Connection → CA badge →
+  category) with independent per-CA category counts; single-CA connections
+  keep the classic flat tree.
 - **Real-time data display** with incremental polling and virtual scrolling
 - **Category tree** with live point counts (SP, DP, ST, BO, ME_NA, ME_NB, ME_NC, IT)
-- **Control commands**: Direct Execute and Select-before-Operate (SbO)
-- **Right-click context menu** for quick control actions
+- **Custom Control button** in the toolbar opens a free-form command dialog
+  (CA dropdown of the connection's configured CAs, type any IOA + value).
+  Stays open after a successful send so you can iterate; remembers your
+  last CA / IOA / type / value across opens via localStorage.
+- **Control commands**: Direct Execute and Select-before-Operate (SbO);
+  right-click on any point sends to its actual source CA in multi-CA setups
 - **Value panel** showing selected point details
 - **General Interrogation**, **Counter Read**, and **Clock Sync** commands
-- **Communication log** with frame analysis
+- **Communication log** with TLS handshake events, U/I/S frame decode,
+  COT names, raw hex bytes, and CSV export
+- **In-app auto-update** from GitHub Releases (ed25519-signed bundles,
+  6 h check throttle, "later" snoozes 24 h)
 
 ## Architecture
 
