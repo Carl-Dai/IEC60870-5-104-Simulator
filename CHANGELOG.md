@@ -2,6 +2,35 @@
 
 本项目的所有重要变更记录在此文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.1.3] - 2026-04-28
+
+### Highlights / 亮点
+
+- ✏️ **主站连接列表右键加 "编辑连接"** / Right-click "Edit connection" on any tree node — 复用新建对话框,标题切到"编辑连接",字段全部预填,提交时先 `delete_connection` 再 `create_connection` (IEC 104 连接是有状态的,只能这么改);要求先断开再编辑,避免悄悄丢运行时状态。
+- 🔁 **CI 给 publish-manifest 加重试** / `publish-manifest` retries the release-tags GET — v1.1.2 publish-manifest 启动时 release 还没对 GitHub REST 可见 (404),整个 job 挂掉;现在 6×5 s 重试,只对 Not Found 重试,其他错误立即抛出。
+- 🖼️ **README 顶部加多 CA 与通信日志截图章节** / Top-of-README screenshots showing the multi-CA tree, new-connection dialog, and TLS / per-CA GI communication log.
+
+### Added 新增
+
+- **主站前端**: ConnectionTree 右键菜单加 `编辑连接 / Edit connection`,通过 inject 拿 Toolbar 提供的 `openEditConnection(connId)` / Tree's right-click menu now has `Edit connection`, wired to a Toolbar-provided `openEditConnection` via Vue inject.
+- **主站前端**: Toolbar 的新建对话框复用为编辑模式 — 标题动态切换 `新建连接 / 编辑连接`,主按钮文字切 `创建 / 保存`;退出按钮统一走 `closeNewConn()` 重置 `editingConnId` / The Toolbar's new-connection dialog doubles as an edit dialog — title and submit-button labels switch on `editingConnId`.
+- **CI 脚本**: `gen-update-manifest.mjs` 新增 `fetchReleaseWithRetry()`,把 `gh api releases/tags/<tag>` 包了 6 次每 5 s 的重试 / `fetchReleaseWithRetry` wraps the initial `gh api releases/tags/<tag>` lookup with 6 attempts at 5 s intervals.
+- **README**: `docs/screenshots/master-multi-ca-newconn.png` + `master-multi-ca-comm-log.png`,在 README 与 README_CN 顶部用 markdown 图片块嵌入 / Two PNG screenshots committed under `docs/screenshots/`, embedded with descriptive captions in both READMEs.
+
+### Changed 改进
+
+- **主站前端**: `localStorage` 持久化的"新建连接"表单**不会被编辑模式污染** — 编辑别的连接时 watch 跳过 `localStorage.setItem`,避免你的"默认新建参数"被另一条连接的当前值覆盖 / Persisted new-connection form is shielded from edit-mode mutations.
+- **README master 段功能列表** 同步到 v1.1.x 的实际能力 (多 CA 三层树、自定义控制按钮、控制对话框持久化、应用内自动更新) / Master feature list in both READMEs aligned with current v1.1.x reality.
+
+### Fixed 修复
+
+- **CI**: tauri-action 创建 release 与 publish-manifest 启动之间的赛跑导致 v1.1.2 整个 release pipeline 失败,现在自动重试解决 / Fixed the v1.1.2-style race where `publish-manifest` failed because the release wasn't yet visible to GitHub's REST API.
+
+### Known limitations / 已知限制
+
+- **编辑连接时 TLS 三个证书路径**会回填上次 *新建连接* 表单里保存的值,因为后端 `ConnectionInfo` DTO 不暴露这些路径 / Editing a connection back-fills TLS file paths from the persisted new-connection form (the backend doesn't expose them on `ConnectionInfo`). Verify the paths before saving if multiple connections use different cert files.
+- **正在 Connected 的连接不能编辑** — 弹出提示让你先断开 / Editing a Connected connection is blocked with a prompt to disconnect first.
+
 ## [1.1.2] - 2026-04-28
 
 ### 修复 / Fixed
