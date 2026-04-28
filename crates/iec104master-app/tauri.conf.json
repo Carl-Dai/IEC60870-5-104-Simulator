@@ -42,5 +42,13 @@
         "type": "downloadBootstrapper"
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/kelsoprotein-lab/IEC60870-5-104-Simulator/releases/latest/download/latest-master.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwMDdEMkNDRUUwQjJEMjYKUldRbUxRdnV6TklIa0M4Y0t2V0V5NXRVL0tUZ29hRXVQTExZTzZqaGdHTzJhN0NoL1FvY2pkSFMK"
+    }
   }
 }
