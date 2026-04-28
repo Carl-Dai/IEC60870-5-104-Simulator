@@ -15,6 +15,9 @@ import type { ReceivedDataPointInfo } from './types'
 // Shared state
 const selectedConnectionId = ref<string | null>(null)
 const selectedConnectionState = ref<string>('Disconnected')
+// Multi-CA: which Common Address inside the selected connection is the user
+// looking at? `null` means "all CAs combined" (legacy single-CA behaviour).
+const selectedCA = ref<number | null>(null)
 const selectedCategory = ref<string | null>(null)
 const selectedPoints = ref<ReceivedDataPointInfo[]>([])
 const logExpanded = ref(false)
@@ -22,6 +25,7 @@ const logExpanded = ref(false)
 // Provide shared state to children
 provide('selectedConnectionId', selectedConnectionId)
 provide('selectedConnectionState', selectedConnectionState)
+provide('selectedCA', selectedCA)
 provide('selectedCategory', selectedCategory)
 provide('selectedPoints', selectedPoints)
 
@@ -47,8 +51,9 @@ provide('refreshData', refreshData)
 const changedCategories = ref<Map<string, Set<string>>>(new Map())
 provide('changedCategories', changedCategories)
 
-// Per-connection category counts: connId -> Map<categoryLabel, count>
-const categoryCounts = ref<Map<string, Map<string, number>>>(new Map())
+// Per-connection-per-CA category counts: connId -> Map<CA, Map<categoryLabel, count>>
+// (DataTable updates this from the points stream; ConnectionTree reads it.)
+const categoryCounts = ref<Map<string, Map<number, Map<string, number>>>>(new Map())
 provide('categoryCounts', categoryCounts)
 
 provide(dialogKey, { showAlert, showConfirm, showPrompt })
@@ -77,14 +82,16 @@ function handleConnectionSelect(id: string, state: string) {
   selectedConnectionState.value = state
   // Only clear category when switching to a different connection
   if (changed) {
+    selectedCA.value = null
     selectedCategory.value = null
     selectedPoints.value = []
   }
 }
 
-function handleCategorySelect(connectionId: string, category: string) {
+function handleCategorySelect(connectionId: string, category: string, ca: number | null) {
   selectedConnectionId.value = connectionId
   selectedConnectionState.value = selectedConnectionState.value // preserve
+  selectedCA.value = ca
   selectedCategory.value = category
 }
 

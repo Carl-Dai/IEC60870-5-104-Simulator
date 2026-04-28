@@ -10,6 +10,8 @@ export interface ConnectionInfo {
 
 export interface ReceivedDataPointInfo {
   ioa: number
+  /** Common Address of the station this point came from. */
+  common_address: number
   asdu_type: string
   category: string
   value: string

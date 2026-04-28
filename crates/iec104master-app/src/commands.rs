@@ -634,9 +634,10 @@ fn build_control_frames_setpoint_float(ca: u16, ioa: u32, value: f32, select: bo
 // Data Commands
 // ---------------------------------------------------------------------------
 
-fn point_to_info(p: &iec104sim_core::data_point::DataPoint) -> ReceivedDataPointInfo {
+fn point_to_info(ca: u16, p: &iec104sim_core::data_point::DataPoint) -> ReceivedDataPointInfo {
     ReceivedDataPointInfo {
         ioa: p.ioa,
+        common_address: ca,
         asdu_type: p.asdu_type.name().to_string(),
         category: p.asdu_type.category().name().to_string(),
         value: p.value.display(),
@@ -660,7 +661,7 @@ pub async fn get_received_data(
     let result: Vec<ReceivedDataPointInfo> = data
         .all_sorted()
         .iter()
-        .map(|p| point_to_info(p))
+        .map(|(ca, p)| point_to_info(*ca, p))
         .collect();
 
     Ok(result)
@@ -681,12 +682,12 @@ pub async fn get_received_data_since(
     let points: Vec<ReceivedDataPointInfo> = data
         .changed_since(since_seq)
         .iter()
-        .map(|p| point_to_info(p))
+        .map(|(ca, p)| point_to_info(*ca, p))
         .collect();
 
     Ok(IncrementalDataResponse {
         seq: data.current_seq(),
-        total_count: data.len(),
+        total_count: data.total_len(),
         points,
     })
 }

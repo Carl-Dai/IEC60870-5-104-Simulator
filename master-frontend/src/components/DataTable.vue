@@ -13,14 +13,17 @@ const emit = defineEmits<{
 }>()
 
 const selectedConnectionId = inject<Ref<string | null>>('selectedConnectionId')!
+const selectedCA = inject<Ref<number | null>>('selectedCA')!
 const selectedCategory = inject<Ref<string | null>>('selectedCategory')!
 const dataRefreshKey = inject<Ref<number>>('dataRefreshKey')!
 const changedCategories = inject<Ref<Map<string, Set<string>>>>('changedCategories')!
-const categoryCounts = inject<Ref<Map<string, Map<string, number>>>>('categoryCounts')!
+const categoryCounts = inject<Ref<Map<string, Map<number, Map<string, number>>>>>('categoryCounts')!
 
-// Composite key: same IOA can carry different ASDU types (e.g. M_ME_NC_1 and M_IT_NA_1).
-// Keying by IOA alone caused GI/CI responses to overwrite each other at shared IOAs.
-const pointKey = (p: { ioa: number; asdu_type: string }) => `${p.ioa}|${p.asdu_type}`
+// Composite key: same IOA can carry different ASDU types AND can collide
+// across CAs on the same connection. Including CA prevents distinct
+// stations' identical IOAs from clobbering each other in the local cache.
+const pointKey = (p: { ioa: number; asdu_type: string; common_address: number }) =>
+  `${p.common_address}|${p.ioa}|${p.asdu_type}`
 
 // === Core data: plain JS Map (not reactive) + shallow ref for display array ===
 let dataMap = new Map<string, ReceivedDataPointInfo>()
@@ -46,16 +49,22 @@ let pollTimer: number | null = null
 // === Rebuild display array from dataMap + update category counts ===
 function updateDisplay() {
   const arr = Array.from(dataMap.values())
-  arr.sort((a, b) => a.ioa - b.ioa)
+  arr.sort((a, b) => {
+    if (a.common_address !== b.common_address) return a.common_address - b.common_address
+    return a.ioa - b.ioa
+  })
   displayPoints.value = arr
   if (!currentConnId) return
-  // Compute realtime category counts, scoped to the current connection
-  const counts = new Map<string, number>()
+  // Compute per-CA per-category counts so the tree can show "CA 1 → 单点
+  // (123)" instead of summing across stations.
+  const byCa = new Map<number, Map<string, number>>()
   for (const p of arr) {
-    counts.set(p.category, (counts.get(p.category) || 0) + 1)
+    let perCat = byCa.get(p.common_address)
+    if (!perCat) { perCat = new Map(); byCa.set(p.common_address, perCat) }
+    perCat.set(p.category, (perCat.get(p.category) || 0) + 1)
   }
   const next = new Map(categoryCounts.value)
-  next.set(currentConnId, counts)
+  next.set(currentConnId, byCa)
   categoryCounts.value = next
 }
 
@@ -161,6 +170,11 @@ watch(dataRefreshKey, fetchData)
 // === Filtered + virtual scroll ===
 const filteredPoints = computed(() => {
   let pts = displayPoints.value
+  // selectedCA === null → show every station (legacy single-CA behaviour
+  // and "click connection node directly" both end up here).
+  if (selectedCA.value !== null) {
+    pts = pts.filter(p => p.common_address === selectedCA.value)
+  }
   if (selectedCategory.value) {
     pts = pts.filter(p => p.category === selectedCategory.value)
   }
@@ -250,27 +264,18 @@ function hideContextMenu() {
   contextMenu.value.visible = false
 }
 
-async function getCommonAddress(): Promise<number> {
-  // Limitation: received data points don't carry CA info, so a context-menu
-  // control command is sent to the connection's first CA. For multi-CA
-  // setups with overlapping IOAs the user may need to issue commands via
-  // a different mechanism (TODO).
-  const conns = await invoke<any[]>('list_connections')
-  const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
-  return conn?.common_addresses?.[0] ?? conn?.common_address ?? 1
-}
-
 async function ctxSendCommand(value: string, selectMode: boolean = false) {
   const point = contextMenu.value.point
   if (!point || !selectedConnectionId.value || !ctxControlConfig.value) return
   hideContextMenu()
   try {
-    const ca = await getCommonAddress()
+    // The point now carries its own CA (the station that sent it), so the
+    // control command targets the correct station even in multi-CA setups.
     await invoke<ControlResult>('send_control_command', {
       request: {
         connection_id: selectedConnectionId.value,
         ioa: point.ioa,
-        common_address: ca,
+        common_address: point.common_address,
         command_type: ctxControlConfig.value.commandType,
         value: value,
         select: selectMode,
@@ -289,12 +294,14 @@ function ctxCopy(text: string) {
 // ControlDialog state (for free-control entry)
 const showControlDialog = ref(false)
 const controlDialogIoa = ref<number | null>(null)
+const controlDialogCA = ref<number>(1)
 const controlDialogType = ref<CommandType | null>(null)
 
 function ctxOpenControlDialog() {
   const point = contextMenu.value.point
   if (!point) return
   controlDialogIoa.value = point.ioa
+  controlDialogCA.value = point.common_address
   const config = ctxControlConfig.value
   controlDialogType.value = config?.commandType ?? null
   hideContextMenu()
@@ -406,7 +413,7 @@ function isCtxActiveOption(optValue: string): boolean {
     <ControlDialog
       :visible="showControlDialog"
       :connection-id="selectedConnectionId"
-      :common-address="1"
+      :common-address="controlDialogCA"
       :prefill-ioa="controlDialogIoa"
       :prefill-command-type="controlDialogType"
       @close="showControlDialog = false"

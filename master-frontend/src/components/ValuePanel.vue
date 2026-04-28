@@ -29,27 +29,20 @@ const controlConfig = computed(() => {
 // Get current value string for highlighting active state
 const currentValue = computed(() => firstPoint.value?.value ?? '')
 
-async function getCommonAddress(): Promise<number> {
-  // Multi-CA limitation: control commands target the connection's first CA
-  // since received data points don't carry CA info. See DataTable.vue for
-  // the same caveat.
-  const conns = await invoke<any[]>('list_connections')
-  const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
-  return conn?.common_addresses?.[0] ?? conn?.common_address ?? 1
-}
-
 async function sendCommand(value: string | number | boolean) {
   if (!selectedConnectionId.value || !firstPoint.value || !controlConfig.value) return
   sending.value = true
   lastResult.value = null
 
   try {
-    const ca = await getCommonAddress()
+    // The selected point carries its own CA (the station that emitted it),
+    // so the control command always targets the right station even when
+    // the connection has multiple CAs configured.
     const result = await invoke<ControlResult>('send_control_command', {
       request: {
         connection_id: selectedConnectionId.value,
         ioa: firstPoint.value.ioa,
-        common_address: ca,
+        common_address: firstPoint.value.common_address,
         command_type: controlConfig.value.commandType,
         value: String(value),
         select: cmdSelect.value,

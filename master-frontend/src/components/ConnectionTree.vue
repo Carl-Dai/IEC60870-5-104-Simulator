@@ -8,13 +8,17 @@ const { t } = useI18n()
 
 const emit = defineEmits<{
   (e: 'connection-select', id: string, state: string): void
-  (e: 'category-select', connectionId: string, category: string): void
+  // ca === null means "all CAs combined" (matches the connection-level
+  // category click); otherwise it's the specific CA the user picked.
+  (e: 'category-select', connectionId: string, category: string, ca: number | null): void
 }>()
 
 const treeRefreshKey = inject<Ref<number>>('treeRefreshKey')!
 const refreshTree = inject<() => void>('refreshTree')!
 const changedCategories = inject<Ref<Map<string, Set<string>>>>('changedCategories')!
-const sharedCategoryCounts = inject<Ref<Map<string, Map<string, number>>>>('categoryCounts')!
+// connId -> Map<CA, Map<categoryLabel, count>>. CA = 0 is reserved for the
+// "all CAs combined" totals (used for the legacy single-CA case).
+const sharedCategoryCounts = inject<Ref<Map<string, Map<number, Map<string, number>>>>>('categoryCounts')!
 
 // Local flash state: keyed by "${connId}|${categoryLabel}" to keep flashes per-connection.
 const flashingCategories = ref<Set<string>>(new Set())
@@ -35,7 +39,6 @@ watch(changedCategories, (map) => {
       }, 3000))
     }
   }
-  // Clear after consuming
   changedCategories.value = new Map()
 })
 
@@ -43,7 +46,6 @@ onUnmounted(() => {
   for (const t of flashTimers.values()) clearTimeout(t)
 })
 
-// IEC 104 data categories matching the backend DataCategory enum display names
 const DATA_CATEGORIES = [
   { key: 'single_point', label: '单点 (SP)' },
   { key: 'double_point', label: '双点 (DP)' },
@@ -58,19 +60,41 @@ const DATA_CATEGORIES = [
 interface TreeConnection {
   info: ConnectionInfo
   expanded: boolean
+  // Per-CA expanded state. Keyed by CA value.
+  caExpanded: Record<number, boolean>
 }
 
 const connections = ref<TreeConnection[]>([])
+// Selected node id is one of:
+//   "<connId>"                     — the connection node itself
+//   "<connId>:ca:<ca>"             — a specific CA group node
+//   "<connId>:ca:<ca>:<catKey>"    — a category under a specific CA
+//   "<connId>:<catKey>"            — a category under "all CAs" (single-CA case)
 const selectedNodeId = ref<string | null>(null)
 
-// Context menu
 const contextMenu = ref<{ visible: boolean; x: number; y: number; connId: string }>({
   visible: false, x: 0, y: 0, connId: ''
 })
 
-// Per-connection count lookup — read from the scoped shared ref in the template.
-function countFor(connId: string, label: string): number {
-  return sharedCategoryCounts.value.get(connId)?.get(label) ?? 0
+// Look up a count for a specific (conn, ca, category) bucket. ca=null sums
+// across every CA (used when the connection has only one CA configured and
+// the tree is rendered flat).
+function countFor(connId: string, label: string, ca: number | null): number {
+  const byCa = sharedCategoryCounts.value.get(connId)
+  if (!byCa) return 0
+  if (ca !== null) {
+    return byCa.get(ca)?.get(label) ?? 0
+  }
+  let total = 0
+  for (const m of byCa.values()) total += m.get(label) ?? 0
+  return total
+}
+
+// Should we render per-CA sub-nodes for this connection? Yes if the user
+// configured multiple CAs (`common_addresses.length > 1`); otherwise the
+// classic flat tree is friendlier.
+function isMultiCA(conn: TreeConnection): boolean {
+  return conn.info.common_addresses.length > 1
 }
 
 async function loadTree() {
@@ -83,11 +107,13 @@ async function loadTree() {
       newTree.push({
         info: conn,
         expanded: existing?.expanded ?? true,
+        caExpanded: existing?.caExpanded ?? Object.fromEntries(
+          conn.common_addresses.map((ca) => [ca, true])
+        ),
       })
     }
     connections.value = newTree
 
-    // GC stale entries for connections that no longer exist
     const staleCounts = [...sharedCategoryCounts.value.keys()].filter(k => !activeIds.has(k))
     if (staleCounts.length > 0) {
       const next = new Map(sharedCategoryCounts.value)
@@ -113,14 +139,20 @@ function selectConnection(conn: TreeConnection) {
   emit('connection-select', conn.info.id, conn.info.state)
 }
 
-function selectCategory(conn: TreeConnection, cat: { key: string; label: string }) {
-  selectedNodeId.value = `${conn.info.id}:${cat.key}`
-  // Only emit category-select, not connection-select (avoids category being reset to null)
-  emit('category-select', conn.info.id, cat.label)
+function selectCategory(conn: TreeConnection, cat: { key: string; label: string }, ca: number | null) {
+  const id = ca === null
+    ? `${conn.info.id}:${cat.key}`
+    : `${conn.info.id}:ca:${ca}:${cat.key}`
+  selectedNodeId.value = id
+  emit('category-select', conn.info.id, cat.label, ca)
 }
 
 function toggleExpand(conn: TreeConnection) {
   conn.expanded = !conn.expanded
+}
+
+function toggleCAExpand(conn: TreeConnection, ca: number) {
+  conn.caExpanded[ca] = !conn.caExpanded[ca]
 }
 
 function showContextMenu(e: MouseEvent, connId: string) {
@@ -164,33 +196,66 @@ function stateClass(state: string): string {
         @contextmenu="showContextMenu($event, conn.info.id)"
       >
         <span class="node-expand" @click.stop="toggleExpand(conn)">
-          {{ conn.expanded ? '\u25BC' : '\u25B6' }}
+          {{ conn.expanded ? '▼' : '▶' }}
         </span>
         <span :class="['node-status', stateClass(conn.info.state)]"></span>
         <span class="node-label">{{ conn.info.target_address }}:{{ conn.info.port }}</span>
         <span class="node-ca">CA:{{ conn.info.common_addresses.join(',') }}</span>
       </div>
 
-      <!-- Category children -->
+      <!-- Children -->
       <div v-if="conn.expanded" class="tree-children">
-        <div
-          v-for="cat in DATA_CATEGORIES"
-          :key="cat.key"
-          :class="['tree-node', 'tree-child', {
-            selected: selectedNodeId === `${conn.info.id}:${cat.key}`,
-            'cat-flash': flashingCategories.has(flashKey(conn.info.id, cat.label)),
-          }]"
-          @click="selectCategory(conn, cat)"
-        >
-          <span class="node-label">{{ t(`category.${cat.key}`) }}</span>
-          <span class="node-count" v-if="countFor(conn.info.id, cat.label) > 0">
-            {{ countFor(conn.info.id, cat.label) }}
-          </span>
-        </div>
+
+        <!-- Multi-CA: connection -> CA -> category -->
+        <template v-if="isMultiCA(conn)">
+          <div v-for="ca in conn.info.common_addresses" :key="ca" class="ca-group">
+            <div
+              :class="['tree-node', 'ca-node', { selected: selectedNodeId === `${conn.info.id}:ca:${ca}` }]"
+              @click="toggleCAExpand(conn, ca)"
+            >
+              <span class="node-expand">{{ conn.caExpanded[ca] ? '▼' : '▶' }}</span>
+              <span class="ca-badge">CA {{ ca }}</span>
+            </div>
+            <div v-if="conn.caExpanded[ca]" class="ca-children">
+              <div
+                v-for="cat in DATA_CATEGORIES"
+                :key="`${ca}-${cat.key}`"
+                :class="['tree-node', 'tree-child', 'tree-grand', {
+                  selected: selectedNodeId === `${conn.info.id}:ca:${ca}:${cat.key}`,
+                  'cat-flash': flashingCategories.has(flashKey(conn.info.id, cat.label)),
+                }]"
+                @click="selectCategory(conn, cat, ca)"
+              >
+                <span class="node-label">{{ t(`category.${cat.key}`) }}</span>
+                <span class="node-count" v-if="countFor(conn.info.id, cat.label, ca) > 0">
+                  {{ countFor(conn.info.id, cat.label, ca) }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- Single-CA: classic flat tree (counts summed across all CAs, which
+             in this case is just the one configured CA). -->
+        <template v-else>
+          <div
+            v-for="cat in DATA_CATEGORIES"
+            :key="cat.key"
+            :class="['tree-node', 'tree-child', {
+              selected: selectedNodeId === `${conn.info.id}:${cat.key}`,
+              'cat-flash': flashingCategories.has(flashKey(conn.info.id, cat.label)),
+            }]"
+            @click="selectCategory(conn, cat, null)"
+          >
+            <span class="node-label">{{ t(`category.${cat.key}`) }}</span>
+            <span class="node-count" v-if="countFor(conn.info.id, cat.label, null) > 0">
+              {{ countFor(conn.info.id, cat.label, null) }}
+            </span>
+          </div>
+        </template>
       </div>
     </div>
 
-    <!-- Context Menu -->
     <div v-if="contextMenu.visible" class="context-menu" :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }">
       <div class="ctx-item danger" @click="ctxDeleteConnection">{{ t('tree.deleteConnection') }}</div>
     </div>
@@ -238,13 +303,34 @@ function stateClass(state: string): string {
 }
 
 .tree-node.selected .node-ca,
-.tree-node.selected .node-count {
+.tree-node.selected .node-count,
+.tree-node.selected .ca-badge {
   color: #1e1e2e;
-  opacity: 0.7;
+  opacity: 0.85;
 }
 
 .tree-child {
   padding-left: 28px;
+}
+
+.tree-grand {
+  padding-left: 48px;
+}
+
+.ca-node {
+  padding-left: 18px;
+  font-weight: 500;
+}
+
+.ca-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: #313244;
+  color: #cba6f7;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
 }
 
 .node-expand {
@@ -287,7 +373,6 @@ function stateClass(state: string): string {
   text-align: center;
 }
 
-/* Context Menu */
 .context-menu {
   position: fixed;
   background: #1e1e2e;

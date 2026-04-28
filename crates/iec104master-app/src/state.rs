@@ -56,6 +56,10 @@ pub struct ConnectionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReceivedDataPointInfo {
     pub ioa: u32,
+    /// Common Address of the station that sourced this point. Required by
+    /// the frontend so the tree can group "connection → CA → category" and
+    /// so right-click control commands target the correct station.
+    pub common_address: u16,
     pub asdu_type: String,
     pub category: String,
     pub value: String,

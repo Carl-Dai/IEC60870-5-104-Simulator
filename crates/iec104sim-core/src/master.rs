@@ -205,7 +205,79 @@ impl Default for MasterConfig {
 }
 
 /// Received data storage.
-pub type SharedReceivedData = Arc<RwLock<DataPointMap>>;
+///
+/// One IEC 104 master TCP connection can talk to multiple stations
+/// (each identified by its Common Address). The same IOA can exist on
+/// different stations with completely different meaning, so we keep a
+/// separate `DataPointMap` per CA — keying everything by IOA alone would
+/// silently overwrite collisions. A connection-wide monotonic
+/// `seq_counter` lets the frontend ask "what changed since X?" across
+/// every CA in one query.
+pub type SharedReceivedData = Arc<RwLock<MasterReceivedData>>;
+
+#[derive(Debug, Default)]
+pub struct MasterReceivedData {
+    by_ca: std::collections::HashMap<u16, DataPointMap>,
+    seq_counter: u64,
+}
+
+impl MasterReceivedData {
+    pub fn new() -> Self { Self::default() }
+
+    /// Insert/update a data point under the given CA, stamping it with
+    /// the connection-wide seq.
+    pub fn insert(&mut self, ca: u16, mut point: DataPoint) {
+        self.seq_counter += 1;
+        point.update_seq = self.seq_counter;
+        let map = self.by_ca.entry(ca).or_default();
+        // Bypass DataPointMap::insert (which would overwrite update_seq with
+        // its own per-map counter); we want the connection-wide stamp.
+        map.points.insert((point.ioa, point.asdu_type), point);
+    }
+
+    pub fn current_seq(&self) -> u64 { self.seq_counter }
+
+    pub fn total_len(&self) -> usize {
+        self.by_ca.values().map(|m| m.len()).sum()
+    }
+
+    /// Sorted list of CAs that have at least one point.
+    pub fn cas(&self) -> Vec<u16> {
+        let mut v: Vec<u16> = self.by_ca.keys().copied().collect();
+        v.sort();
+        v
+    }
+
+    /// Read access to a single CA's map (for backwards-compat tests).
+    pub fn ca_map(&self, ca: u16) -> Option<&DataPointMap> { self.by_ca.get(&ca) }
+
+    /// All points across every CA, sorted by (CA, IOA).
+    pub fn all_sorted(&self) -> Vec<(u16, &DataPoint)> {
+        let mut out = Vec::with_capacity(self.total_len());
+        for (&ca, map) in &self.by_ca {
+            for p in map.points.values() {
+                out.push((ca, p));
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.ioa.cmp(&b.1.ioa)));
+        out
+    }
+
+    /// Points whose seq is strictly greater than the given watermark,
+    /// across every CA, sorted by (CA, IOA).
+    pub fn changed_since(&self, since: u64) -> Vec<(u16, &DataPoint)> {
+        let mut out = Vec::new();
+        for (&ca, map) in &self.by_ca {
+            for p in map.points.values() {
+                if p.update_seq > since {
+                    out.push((ca, p));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.ioa.cmp(&b.1.ioa)));
+        out
+    }
+}
 
 /// Shared sequence number counters for IEC 104 protocol.
 #[derive(Debug)]
@@ -253,7 +325,7 @@ impl MasterConnection {
         let (state_tx, _) = tokio::sync::watch::channel(MasterState::Disconnected);
         Self {
             config,
-            received_data: Arc::new(RwLock::new(DataPointMap::new())),
+            received_data: Arc::new(RwLock::new(MasterReceivedData::new())),
             log_collector: None,
             state_tx,
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1222,14 +1294,17 @@ fn parse_and_store_asdu(
         points.push(DataPoint::with_value(ioa, asdu_id, value));
     }
 
-    // Batch insert — single lock acquisition for all points in this frame
+    // Batch insert — single lock acquisition for all points in this frame.
+    // Each point is stored under the CA we extracted from the ASDU header
+    // above, so two stations sharing IOAs over the same TCP connection no
+    // longer overwrite each other.
     if !points.is_empty() {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let rd = received_data.clone();
             handle.block_on(async {
-                let mut map = rd.write().await;
+                let mut maps = rd.write().await;
                 for point in points {
-                    map.insert(point);
+                    maps.insert(ca, point);
                 }
             });
         }
