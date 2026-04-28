@@ -59,6 +59,7 @@ jobs:
         working-directory: frontend
 
       - uses: tauri-apps/tauri-action@v0
+        id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -70,7 +71,23 @@ jobs:
           releaseBody: 'See the assets below to download the installers for your platform.'
           releaseDraft: false
           prerelease: false
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
+
+      - name: Upload updater artifacts (sig + bundles)
+        if: steps.tauri.outputs.artifactPaths != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo '${{ steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | while IFS= read -r f; do
+            case "$f" in
+              *.sig|*.app.tar.gz|*.nsis.zip|*.AppImage.tar.gz)
+                echo "Uploading $f"
+                gh release upload "${{ github.ref_name }}" "$f" --clobber --repo "${{ github.repository }}"
+                ;;
+            esac
+          done
 
   build-master:
     strategy:
@@ -122,6 +139,7 @@ jobs:
         working-directory: master-frontend
 
       - uses: tauri-apps/tauri-action@v0
+        id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -133,7 +151,23 @@ jobs:
           releaseBody: 'See the assets below to download the installers for your platform.'
           releaseDraft: false
           prerelease: false
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
+
+      - name: Upload updater artifacts (sig + bundles)
+        if: steps.tauri.outputs.artifactPaths != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo '${{ steps.tauri.outputs.artifactPaths }}' | jq -r '.[]' | while IFS= read -r f; do
+            case "$f" in
+              *.sig|*.app.tar.gz|*.nsis.zip|*.AppImage.tar.gz)
+                echo "Uploading $f"
+                gh release upload "${{ github.ref_name }}" "$f" --clobber --repo "${{ github.repository }}"
+                ;;
+            esac
+          done
 
   publish-manifest:
     needs: [build-slave, build-master]
