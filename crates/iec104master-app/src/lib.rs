@@ -1,5 +1,6 @@
 mod commands;
 mod state;
+pub mod update;
 
 use state::AppState;
 
