@@ -9,6 +9,11 @@ use tokio::sync::RwLock;
 pub struct MasterConnectionState {
     pub connection: MasterConnection,
     pub log_collector: Arc<LogCollector>,
+    /// All Common Addresses (CAs) this connection talks to. Used by the
+    /// Tauri layer to fan out interrogation / clock-sync / counter-read /
+    /// auto-GI to every station the user configured. Always non-empty
+    /// (defaults to vec![1]).
+    pub common_addresses: Vec<u16>,
 }
 
 /// Application state holding all active master connections.
@@ -42,7 +47,8 @@ pub struct ConnectionInfo {
     pub id: String,
     pub target_address: String,
     pub port: u16,
-    pub common_address: u16,
+    /// All CAs configured for this connection (always non-empty).
+    pub common_addresses: Vec<u16>,
     pub state: String,
     pub use_tls: bool,
 }

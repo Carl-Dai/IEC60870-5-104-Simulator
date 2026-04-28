@@ -2,7 +2,8 @@ export interface ConnectionInfo {
   id: string
   target_address: string
   port: number
-  common_address: number
+  /** All Common Addresses configured for this connection. Always non-empty. */
+  common_addresses: number[]
   state: string
   use_tls: boolean
 }

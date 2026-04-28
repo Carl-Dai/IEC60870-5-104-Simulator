@@ -28,6 +28,8 @@ const dict: DictShape = {
     targetAddress: 'Target Address',
     port: 'Port',
     commonAddress: 'Common Address (CA)',
+    commonAddressHint: 'Comma-separated for multiple, e.g. 1, 2, 3',
+    invalidCA: 'Enter at least one valid Common Address (1-65534)',
     enableTls: 'Enable TLS',
     tlsVersion: 'TLS Version',
     tlsAuto: 'Auto',

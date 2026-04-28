@@ -168,7 +168,7 @@ function stateClass(state: string): string {
         </span>
         <span :class="['node-status', stateClass(conn.info.state)]"></span>
         <span class="node-label">{{ conn.info.target_address }}:{{ conn.info.port }}</span>
-        <span class="node-ca">CA:{{ conn.info.common_address }}</span>
+        <span class="node-ca">CA:{{ conn.info.common_addresses.join(',') }}</span>
       </div>
 
       <!-- Category children -->

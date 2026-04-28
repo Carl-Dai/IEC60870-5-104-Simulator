@@ -251,9 +251,13 @@ function hideContextMenu() {
 }
 
 async function getCommonAddress(): Promise<number> {
+  // Limitation: received data points don't carry CA info, so a context-menu
+  // control command is sent to the connection's first CA. For multi-CA
+  // setups with overlapping IOAs the user may need to issue commands via
+  // a different mechanism (TODO).
   const conns = await invoke<any[]>('list_connections')
   const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
-  return conn?.common_address ?? 1
+  return conn?.common_addresses?.[0] ?? conn?.common_address ?? 1
 }
 
 async function ctxSendCommand(value: string, selectMode: boolean = false) {

@@ -26,6 +26,8 @@ export type DictShape = {
     targetAddress: string
     port: string
     commonAddress: string
+    commonAddressHint: string
+    invalidCA: string
     enableTls: string
     tlsVersion: string
     tlsAuto: string
@@ -210,6 +212,8 @@ const dict: DictShape = {
     targetAddress: '目标地址',
     port: '端口',
     commonAddress: '公共地址 (CA)',
+    commonAddressHint: '多个公共地址用逗号分隔，例如 1, 2, 3',
+    invalidCA: '请填写至少一个有效的公共地址 (1–65534)',
     enableTls: '启用 TLS',
     tlsVersion: 'TLS 版本',
     tlsAuto: '自动',

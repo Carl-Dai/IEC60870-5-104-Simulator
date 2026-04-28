@@ -26,6 +26,13 @@ pub struct ConnectionStateEvent {
 pub struct CreateConnectionRequest {
     pub target_address: String,
     pub port: u16,
+    /// All Common Addresses to talk to over this connection. If absent or
+    /// empty, falls back to `[common_address]` (legacy single-CA field) or
+    /// finally `[1]`.
+    #[serde(default)]
+    pub common_addresses: Option<Vec<u16>>,
+    /// Legacy single-CA field. Kept for backward compatibility with older
+    /// frontend builds; ignored when `common_addresses` is non-empty.
     pub common_address: Option<u16>,
     pub timeout_ms: Option<u64>,
     /// TLS configuration
@@ -36,6 +43,19 @@ pub struct CreateConnectionRequest {
     pub accept_invalid_certs: Option<bool>,
     /// TLS version policy: "auto" | "tls12_only" | "tls13_only" (default: "auto")
     pub tls_version: Option<String>,
+}
+
+impl CreateConnectionRequest {
+    /// Resolve the final list of CAs from the request, applying backward-compat
+    /// rules. Always returns at least one element.
+    fn resolve_cas(&self) -> Vec<u16> {
+        if let Some(list) = &self.common_addresses {
+            if !list.is_empty() {
+                return list.clone();
+            }
+        }
+        vec![self.common_address.unwrap_or(1)]
+    }
 }
 
 #[tauri::command]
@@ -51,10 +71,14 @@ pub async fn create_connection(
         id
     };
 
+    let common_addresses = request.resolve_cas();
     let config = MasterConfig {
         target_address: request.target_address.clone(),
         port: request.port,
-        common_address: request.common_address.unwrap_or(1),
+        // Core's MasterConfig still tracks a single "primary" CA used for
+        // identification/defaults inside the protocol layer. Multi-CA fan-out
+        // happens at this app's command layer, so keep the first as primary.
+        common_address: common_addresses[0],
         timeout_ms: request.timeout_ms.unwrap_or(3000),
         tls: TlsConfig {
             enabled: request.use_tls.unwrap_or(false),
@@ -99,7 +123,7 @@ pub async fn create_connection(
         id: id.clone(),
         target_address: config.target_address,
         port: config.port,
-        common_address: config.common_address,
+        common_addresses: common_addresses.clone(),
         state: format!("{:?}", connection.state()),
         use_tls,
     };
@@ -109,6 +133,7 @@ pub async fn create_connection(
         MasterConnectionState {
             connection,
             log_collector,
+            common_addresses,
         },
     );
 
@@ -175,7 +200,7 @@ pub async fn list_connections(
             id: id.clone(),
             target_address: conn_state.connection.config.target_address.clone(),
             port: conn_state.connection.config.port,
-            common_address: conn_state.connection.config.common_address,
+            common_addresses: conn_state.common_addresses.clone(),
             state: format!("{:?}", conn_state.connection.state()),
             use_tls: conn_state.connection.config.tls.enabled,
         });

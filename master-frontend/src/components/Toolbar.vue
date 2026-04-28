@@ -24,7 +24,8 @@ const NEW_CONN_FORM_KEY = 'iec104master.newConnForm.v1'
 type NewConnForm = {
   target_address: string
   port: number
-  common_address: number
+  /** Free-form text user types: e.g. "1, 2, 3". Parsed on submit. */
+  common_addresses_text: string
   use_tls: boolean
   ca_file: string
   cert_file: string
@@ -35,7 +36,7 @@ type NewConnForm = {
 const defaultForm = (): NewConnForm => ({
   target_address: '127.0.0.1',
   port: 2404,
-  common_address: 1,
+  common_addresses_text: '1',
   use_tls: false,
   ca_file: './ca.pem',
   cert_file: './client.pem',
@@ -43,15 +44,34 @@ const defaultForm = (): NewConnForm => ({
   accept_invalid_certs: false,
   tls_version: 'auto',
 })
+function parseCAList(s: string): number[] {
+  const seen = new Set<number>()
+  const out: number[] = []
+  for (const tok of s.split(/[,，\s]+/)) {
+    if (!tok) continue
+    const n = parseInt(tok, 10)
+    if (!Number.isFinite(n) || n < 1 || n > 65534) continue
+    if (seen.has(n)) continue
+    seen.add(n); out.push(n)
+  }
+  return out
+}
 function loadForm(): NewConnForm {
   try {
     const raw = localStorage.getItem(NEW_CONN_FORM_KEY)
     if (raw) {
-      const merged = { ...defaultForm(), ...JSON.parse(raw) }
+      const parsed = JSON.parse(raw) as Partial<NewConnForm> & { common_address?: number }
+      // Migrate legacy single-CA field to text representation.
+      if (typeof parsed.common_address === 'number' && parsed.common_addresses_text == null) {
+        parsed.common_addresses_text = String(parsed.common_address)
+      }
+      delete (parsed as { common_address?: number }).common_address
+      const merged = { ...defaultForm(), ...parsed } as NewConnForm
       const def = defaultForm()
       if (!merged.ca_file) merged.ca_file = def.ca_file
       if (!merged.cert_file) merged.cert_file = def.cert_file
       if (!merged.key_file) merged.key_file = def.key_file
+      if (!merged.common_addresses_text) merged.common_addresses_text = def.common_addresses_text
       return merged
     }
   } catch {}
@@ -64,12 +84,17 @@ watch(newConnForm, (v) => {
 }, { deep: true })
 
 async function createConnection() {
+  const cas = parseCAList(newConnForm.value.common_addresses_text)
+  if (cas.length === 0) {
+    await showAlert(t('newConn.invalidCA'))
+    return
+  }
   try {
     await invoke('create_connection', {
       request: {
         target_address: newConnForm.value.target_address,
         port: newConnForm.value.port,
-        common_address: newConnForm.value.common_address,
+        common_addresses: cas,
         use_tls: newConnForm.value.use_tls,
         ca_file: newConnForm.value.ca_file || undefined,
         cert_file: newConnForm.value.cert_file || undefined,
@@ -85,6 +110,14 @@ async function createConnection() {
   }
 }
 
+async function getConnCAs(): Promise<number[]> {
+  const conns = await invoke<any[]>('list_connections')
+  const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
+  const list: unknown = conn?.common_addresses
+  if (Array.isArray(list) && list.length > 0) return list as number[]
+  return [conn?.common_address ?? 1]
+}
+
 async function connectMaster() {
   if (!selectedConnectionId.value) return
   try {
@@ -92,13 +125,13 @@ async function connectMaster() {
     selectedConnectionState.value = 'Connected'
     refreshTree()
     try {
-      const conns = await invoke<any[]>('list_connections')
-      const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
-      const ca = conn?.common_address ?? 1
-      await invoke('send_interrogation', {
-        id: selectedConnectionId.value,
-        commonAddress: ca,
-      })
+      const cas = await getConnCAs()
+      for (const ca of cas) {
+        await invoke('send_interrogation', {
+          id: selectedConnectionId.value,
+          commonAddress: ca,
+        })
+      }
       refreshData()
       setTimeout(() => refreshTree(), 3000)
     } catch (e) {
@@ -135,13 +168,13 @@ async function deleteMaster() {
 async function sendGI() {
   if (!selectedConnectionId.value) return
   try {
-    const conns = await invoke<any[]>('list_connections')
-    const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
-    const ca = conn?.common_address ?? 1
-    await invoke('send_interrogation', {
-      id: selectedConnectionId.value,
-      commonAddress: ca,
-    })
+    const cas = await getConnCAs()
+    for (const ca of cas) {
+      await invoke('send_interrogation', {
+        id: selectedConnectionId.value,
+        commonAddress: ca,
+      })
+    }
     refreshData()
     // Delayed tree refresh to update category counts after data arrives
     setTimeout(() => refreshTree(), 3000)
@@ -153,13 +186,13 @@ async function sendGI() {
 async function sendClockSync() {
   if (!selectedConnectionId.value) return
   try {
-    const conns = await invoke<any[]>('list_connections')
-    const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
-    const ca = conn?.common_address ?? 1
-    await invoke('send_clock_sync', {
-      id: selectedConnectionId.value,
-      commonAddress: ca,
-    })
+    const cas = await getConnCAs()
+    for (const ca of cas) {
+      await invoke('send_clock_sync', {
+        id: selectedConnectionId.value,
+        commonAddress: ca,
+      })
+    }
   } catch (e) {
     await showAlert(String(e))
   }
@@ -168,13 +201,13 @@ async function sendClockSync() {
 async function sendCounterRead() {
   if (!selectedConnectionId.value) return
   try {
-    const conns = await invoke<any[]>('list_connections')
-    const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
-    const ca = conn?.common_address ?? 1
-    await invoke('send_counter_read', {
-      id: selectedConnectionId.value,
-      commonAddress: ca,
-    })
+    const cas = await getConnCAs()
+    for (const ca of cas) {
+      await invoke('send_counter_read', {
+        id: selectedConnectionId.value,
+        commonAddress: ca,
+      })
+    }
     refreshData()
     setTimeout(() => refreshTree(), 3000)
   } catch (e) {
@@ -247,7 +280,13 @@ const hasConnection = () => selectedConnectionId.value !== null
           </label>
           <label class="form-label">
             {{ t('newConn.commonAddress') }}
-            <input v-model.number="newConnForm.common_address" class="form-input" type="number" min="1" max="65534" />
+            <input
+              v-model="newConnForm.common_addresses_text"
+              class="form-input"
+              type="text"
+              placeholder="1, 2, 3"
+            />
+            <span class="form-hint">{{ t('newConn.commonAddressHint') }}</span>
           </label>
 
           <!-- TLS Configuration -->
@@ -425,6 +464,12 @@ const hasConnection = () => selectedConnectionId.value !== null
 .form-input:focus {
   outline: none;
   border-color: #89b4fa;
+}
+
+.form-hint {
+  font-size: 11px;
+  color: #6c7086;
+  margin-top: 2px;
 }
 
 .tls-section {

@@ -30,9 +30,12 @@ const controlConfig = computed(() => {
 const currentValue = computed(() => firstPoint.value?.value ?? '')
 
 async function getCommonAddress(): Promise<number> {
+  // Multi-CA limitation: control commands target the connection's first CA
+  // since received data points don't carry CA info. See DataTable.vue for
+  // the same caveat.
   const conns = await invoke<any[]>('list_connections')
   const conn = conns.find((c: any) => c.id === selectedConnectionId.value)
-  return conn?.common_address ?? 1
+  return conn?.common_addresses?.[0] ?? conn?.common_address ?? 1
 }
 
 async function sendCommand(value: string | number | boolean) {
