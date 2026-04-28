@@ -20,27 +20,72 @@ const emit = defineEmits<{
   (e: 'sent'): void
 }>()
 
-const ioa = ref<number>(0)
-const ca = ref<number>(1)
-const commandType = ref<CommandType>('single')
-const selectMode = ref(false)
+// Persist user-entered fields across opens AND across app restarts. The
+// values reset *only* when the caller explicitly prefills them (clicking
+// a specific data point), or on first launch.
+const STORAGE_KEY = 'iec104master.controlDialog.v1'
+type Persisted = {
+  ca: number
+  ioa: number
+  commandType: CommandType
+  selectMode: boolean
+  singleValue: string
+  doubleValue: string
+  stepValue: string
+  normalizedValue: string
+  scaledValue: string
+  floatValue: string
+  bitstringValue: number
+}
+function loadPersisted(): Partial<Persisted> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) return JSON.parse(raw) as Partial<Persisted>
+  } catch { /* ignore */ }
+  return {}
+}
+const saved = loadPersisted()
+
+const ioa = ref<number>(saved.ioa ?? 0)
+const ca = ref<number>(saved.ca ?? 1)
+const commandType = ref<CommandType>(saved.commandType ?? 'single')
+const selectMode = ref(saved.selectMode ?? false)
 const errorMsg = ref('')
 const sending = ref(false)
 const lastResult = ref<ControlResult | null>(null)
 
-// Advanced parameters
+// Advanced parameters (intentionally not persisted — these are per-send
+// tweaks the user usually wants to set deliberately each time)
 const showAdvanced = ref(false)
 const qualifier = ref<number>(0)
 const cot = ref<number>(6)
 
-// Value state per type
-const singleValue = ref('true')
-const doubleValue = ref('2')
-const stepValue = ref('2')
-const normalizedValue = ref('0.0')
-const scaledValue = ref('0')
-const floatValue = ref('0.0')
-const bitstringValue = ref<number>(0)
+// Value state per type — persisted so the user's last-typed value for
+// each command type comes back the next time they open the dialog.
+const singleValue = ref(saved.singleValue ?? 'true')
+const doubleValue = ref(saved.doubleValue ?? '2')
+const stepValue = ref(saved.stepValue ?? '2')
+const normalizedValue = ref(saved.normalizedValue ?? '0.0')
+const scaledValue = ref(saved.scaledValue ?? '0')
+const floatValue = ref(saved.floatValue ?? '0.0')
+const bitstringValue = ref<number>(saved.bitstringValue ?? 0)
+
+function savePersisted() {
+  const data: Persisted = {
+    ca: ca.value,
+    ioa: ioa.value,
+    commandType: commandType.value,
+    selectMode: selectMode.value,
+    singleValue: singleValue.value,
+    doubleValue: doubleValue.value,
+    stepValue: stepValue.value,
+    normalizedValue: normalizedValue.value,
+    scaledValue: scaledValue.value,
+    floatValue: floatValue.value,
+    bitstringValue: bitstringValue.value,
+  }
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)) } catch { /* ignore */ }
+}
 
 watch(() => props.visible, (v) => {
   if (v) {
@@ -50,7 +95,10 @@ watch(() => props.visible, (v) => {
     qualifier.value = 0
     cot.value = 6
     showAdvanced.value = false
-    ca.value = props.commonAddress
+    // Only override CA / IOA / commandType when the caller explicitly asked
+    // for a specific point (right-click on a data row). Toolbar's "custom
+    // control" passes prefillIoa = null, so the previously-saved values
+    // — including the CA the user typed last time — are preserved.
     if (props.prefillIoa != null) ioa.value = props.prefillIoa
     if (props.prefillCommandType) commandType.value = props.prefillCommandType
   }
@@ -127,6 +175,11 @@ async function send() {
     const result = await invoke<ControlResult>('send_control_command', { request: payload })
     lastResult.value = result
     sending.value = false
+    // Persist on successful send so the user's last good CA / IOA / type /
+    // value combo comes back next time. The dialog stays open so the user
+    // can immediately tweak and send again — `lastResult` shows the OK
+    // indicator beneath the form for confirmation.
+    savePersisted()
     emit('sent')
   } catch (e) {
     errorMsg.value = String(e)

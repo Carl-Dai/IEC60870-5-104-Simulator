@@ -309,7 +309,6 @@ const hasConnection = () => selectedConnectionId.value !== null
     :prefill-ioa="null"
     :prefill-command-type="null"
     @close="showCustomControl = false"
-    @sent="showCustomControl = false"
   />
 
   <!-- New Connection Modal -->

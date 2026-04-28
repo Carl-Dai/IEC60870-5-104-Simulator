@@ -409,7 +409,9 @@ function isCtxActiveOption(optValue: string): boolean {
       </template>
     </div>
 
-    <!-- ControlDialog for free control / setpoint entry -->
+    <!-- ControlDialog for free control / setpoint entry. Stays open after a
+         successful send so the user can iterate; close via the dialog's
+         own button or backdrop click. -->
     <ControlDialog
       :visible="showControlDialog"
       :connection-id="selectedConnectionId"
@@ -417,7 +419,6 @@ function isCtxActiveOption(optValue: string): boolean {
       :prefill-ioa="controlDialogIoa"
       :prefill-command-type="controlDialogType"
       @close="showControlDialog = false"
-      @sent="showControlDialog = false"
     />
   </div>
 </template>
