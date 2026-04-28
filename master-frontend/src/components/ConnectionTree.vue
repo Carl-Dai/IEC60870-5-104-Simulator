@@ -15,6 +15,10 @@ const emit = defineEmits<{
 
 const treeRefreshKey = inject<Ref<number>>('treeRefreshKey')!
 const refreshTree = inject<() => void>('refreshTree')!
+// Provided by Toolbar: opens the new-connection dialog in edit mode for the
+// given connection id. Optional — if Toolbar isn't mounted (shouldn't happen
+// in this app), the menu item just no-ops.
+const openEditConnection = inject<((connId: string) => void) | null>('openEditConnection', null)
 const changedCategories = inject<Ref<Map<string, Set<string>>>>('changedCategories')!
 // connId -> Map<CA, Map<categoryLabel, count>>. CA = 0 is reserved for the
 // "all CAs combined" totals (used for the legacy single-CA case).
@@ -172,6 +176,12 @@ async function ctxDeleteConnection() {
   hideContextMenu()
 }
 
+function ctxEditConnection() {
+  const id = contextMenu.value.connId
+  hideContextMenu()
+  openEditConnection?.(id)
+}
+
 function stateClass(state: string): string {
   const s = state.toLowerCase()
   if (s === 'connected') return 'connected'
@@ -257,6 +267,7 @@ function stateClass(state: string): string {
     </div>
 
     <div v-if="contextMenu.visible" class="context-menu" :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }">
+      <div class="ctx-item" @click="ctxEditConnection">{{ t('tree.editConnection') }}</div>
       <div class="ctx-item danger" @click="ctxDeleteConnection">{{ t('tree.deleteConnection') }}</div>
     </div>
   </div>

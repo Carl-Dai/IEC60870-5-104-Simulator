@@ -24,6 +24,8 @@ export type DictShape = {
   }
   newConn: {
     title: string
+    editTitle: string
+    disconnectFirst: string
     targetAddress: string
     port: string
     commonAddress: string
@@ -44,6 +46,7 @@ export type DictShape = {
     title: string
     noConnections: string
     deleteConnection: string
+    editConnection: string
   }
   category: {
     single_point: string
@@ -233,6 +236,8 @@ const dict: DictShape = {
   },
   newConn: {
     title: '新建连接',
+    editTitle: '编辑连接',
+    disconnectFirst: '请先断开此连接再编辑',
     targetAddress: '目标地址',
     port: '端口',
     commonAddress: '公共地址 (CA)',
@@ -253,6 +258,7 @@ const dict: DictShape = {
     title: '连接列表',
     noConnections: '暂无连接',
     deleteConnection: '删除连接',
+    editConnection: '编辑连接',
   },
   category: {
     single_point: '单点 (SP)',

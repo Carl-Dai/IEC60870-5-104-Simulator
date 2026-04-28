@@ -26,6 +26,8 @@ const dict: DictShape = {
   },
   newConn: {
     title: 'New Connection',
+    editTitle: 'Edit Connection',
+    disconnectFirst: 'Disconnect this connection before editing it.',
     targetAddress: 'Target Address',
     port: 'Port',
     commonAddress: 'Common Address (CA)',
@@ -46,6 +48,7 @@ const dict: DictShape = {
     title: 'Connections',
     noConnections: 'No connections',
     deleteConnection: 'Delete connection',
+    editConnection: 'Edit connection',
   },
   category: {
     single_point: 'Single Point (SP)',

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, ref, watch, type Ref } from 'vue'
+import { inject, provide, ref, watch, type Ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { dialogKey } from '../composables/useDialog'
 import type { showAlert as ShowAlert } from '../composables/useDialog'
@@ -98,9 +98,72 @@ function loadForm(): NewConnForm {
 }
 const showNewConn = ref(false)
 const newConnForm = ref<NewConnForm>(loadForm())
+// When non-null, the dialog is in "edit" mode: clicking 创建 will first
+// delete the connection with this id, then create a fresh one with the
+// edited form. (IEC 104 connections are stateful runtime objects in the
+// backend; we don't have a true "modify in place" command, but
+// recreating preserves the ergonomics with one extra round-trip.)
+const editingConnId = ref<string | null>(null)
 watch(newConnForm, (v) => {
+  // Don't pollute the persisted "last new-connection" form with edit-time
+  // values from another connection — only save when the user is filling
+  // out a *new* connection.
+  if (editingConnId.value !== null) return
   try { localStorage.setItem(NEW_CONN_FORM_KEY, JSON.stringify(v)) } catch {}
 }, { deep: true })
+
+function openNewConnection() {
+  editingConnId.value = null
+  newConnForm.value = loadForm()
+  showNewConn.value = true
+}
+
+function closeNewConn() {
+  showNewConn.value = false
+  editingConnId.value = null
+}
+
+// Save the create-button label. In edit mode the button reads "保存" instead.
+function submitButtonLabel(): string {
+  return editingConnId.value !== null ? t('common.save') : t('newConn.create')
+}
+
+// Exposed to ConnectionTree (via provide/inject) so right-click "编辑连接"
+// can open this same dialog with the chosen connection's current settings.
+async function openEditConnection(connId: string) {
+  try {
+    const conns = await invoke<Array<{
+      id: string; target_address: string; port: number; common_addresses: number[];
+      state: string; use_tls: boolean;
+    }>>('list_connections')
+    const conn = conns.find((c) => c.id === connId)
+    if (!conn) return
+    if (conn.state === 'Connected') {
+      await showAlert(t('newConn.disconnectFirst'))
+      return
+    }
+    editingConnId.value = connId
+    // Carry over TLS file paths from the persisted "new connection" form
+    // — the backend's ConnectionInfo doesn't include them, and forcing
+    // the user to retype every cert path would be miserable.
+    const persisted = loadForm()
+    newConnForm.value = {
+      target_address: conn.target_address,
+      port: conn.port,
+      common_addresses_text: conn.common_addresses.join(', '),
+      use_tls: conn.use_tls,
+      ca_file: persisted.ca_file,
+      cert_file: persisted.cert_file,
+      key_file: persisted.key_file,
+      accept_invalid_certs: persisted.accept_invalid_certs,
+      tls_version: persisted.tls_version,
+    }
+    showNewConn.value = true
+  } catch (e) {
+    await showAlert(String(e))
+  }
+}
+provide('openEditConnection', openEditConnection)
 
 async function createConnection() {
   const cas = parseCAList(newConnForm.value.common_addresses_text)
@@ -109,6 +172,18 @@ async function createConnection() {
     return
   }
   try {
+    if (editingConnId.value !== null) {
+      // Edit mode: delete the existing one first, then recreate. If delete
+      // succeeds but create fails the user is left with no connection —
+      // they keep the form open and can fix the error and retry.
+      await invoke('delete_connection', { id: editingConnId.value })
+      // If the just-deleted connection was the selected one, clear the
+      // selection so the rest of the UI doesn't keep referencing a stale id.
+      if (selectedConnectionId.value === editingConnId.value) {
+        selectedConnectionId.value = null
+        selectedConnectionState.value = 'Disconnected'
+      }
+    }
     await invoke('create_connection', {
       request: {
         target_address: newConnForm.value.target_address,
@@ -123,6 +198,7 @@ async function createConnection() {
       }
     })
     showNewConn.value = false
+    editingConnId.value = null
     refreshTree()
   } catch (e) {
     await showAlert(String(e))
@@ -253,7 +329,7 @@ const hasConnection = () => selectedConnectionId.value !== null
 <template>
   <div class="toolbar">
     <div class="toolbar-group">
-      <button class="toolbar-btn" @click="showNewConn = true">
+      <button class="toolbar-btn" @click="openNewConnection">
         <span class="btn-icon">+</span> {{ t('toolbar.newConnection') }}
       </button>
     </div>
@@ -313,9 +389,11 @@ const hasConnection = () => selectedConnectionId.value !== null
 
   <!-- New Connection Modal -->
   <Teleport to="body">
-    <div v-if="showNewConn" class="modal-backdrop" @mousedown.self="showNewConn = false">
+    <div v-if="showNewConn" class="modal-backdrop" @mousedown.self="closeNewConn">
       <div class="modal-box">
-        <div class="modal-title">{{ t('newConn.title') }}</div>
+        <div class="modal-title">
+          {{ editingConnId ? t('newConn.editTitle') : t('newConn.title') }}
+        </div>
         <div class="modal-body">
           <label class="form-label">
             {{ t('newConn.targetAddress') }}
@@ -372,8 +450,8 @@ const hasConnection = () => selectedConnectionId.value !== null
           </template>
         </div>
         <div class="modal-footer">
-          <button class="btn btn-secondary" @click="showNewConn = false">{{ t('common.cancel') }}</button>
-          <button class="btn btn-primary" @click="createConnection">{{ t('newConn.create') }}</button>
+          <button class="btn btn-secondary" @click="closeNewConn">{{ t('common.cancel') }}</button>
+          <button class="btn btn-primary" @click="createConnection">{{ submitButtonLabel() }}</button>
         </div>
       </div>
     </div>
