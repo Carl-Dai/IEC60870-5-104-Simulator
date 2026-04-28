@@ -2,6 +2,49 @@
 
 本项目的所有重要变更记录在此文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-04-28
+
+> 把 v1.0.9 → v1.0.15 这一系列搭建自动更新链路的工作正式收尾,作为面向用户的 minor release。
+
+### Highlights / 亮点
+
+- 🔄 应用内自动更新 / In-app auto-update via GitHub Releases — 启动 2 秒后静默检查,发现新版本弹窗提示用户更新,下载经 ed25519 签名验证后自动重启;6 小时节流,"稍后" 24 小时内不重提。
+- 🔢 主站支持多公共地址 / Master supports multiple Common Addresses per connection — "新建连接" 输入逗号分隔列表 (如 `1, 2, 3`),自动 GI / 时钟同步 / 累计量召唤按列表循环。
+- 🛡️ 全平台 ed25519 签名 / ed25519-signed bundles for every platform — macOS `.app.tar.gz`、Linux `.AppImage`、Windows `-setup.exe` 都带 `.sig`。
+- 🛠️ Release CI 现在生成两份 manifest / CI now produces `latest-slave.json` and `latest-master.json` — 两个应用各自独立的 updater endpoint,避免混在一起。
+
+### Added 新增
+
+- **主站 + 从站**: `tauri-plugin-updater` / `tauri-plugin-process` / `tauri-plugin-store` 接入,新增三个 Tauri 命令 `check_for_update` / `install_update` / `snooze_update`,纯函数 `should_check` / `is_snoozed` 带 12 个单元测试 (slave + master 各 6 个) / Plugged in updater/process/store plugins; added throttle/snooze pure helpers covered by 12 unit tests.
+- **主站 + 从站**: 新 Vue 组件 `UpdateDialog.vue`,展示版本号、changelog、下载进度、错误重试,中英文 i18n / New `UpdateDialog.vue` showing version, changelog, progress, retry — bilingual i18n.
+- **主站**: 一个连接绑定多个 CA 的字段 `common_addresses: Vec<u16>` (后端) / `common_addresses_text: string → number[]` (前端),`ConnectionTree` 显示 `CA:1,2,3` / Multi-CA per master connection (Rust + Vue), tree shows `CA:1,2,3`.
+- **CI**: 新增 `scripts/gen-update-manifest.mjs` 从 release assets 按文件名前缀拆分生成 `latest-slave.json` / `latest-master.json`,带 vitest 单测覆盖正则匹配与版本号边界 / `gen-update-manifest.mjs` produces split per-role manifests, with vitest covering regex + version boundary cases.
+- **CI**: `release.yml` 新增 `publish-manifest` job,在两个 build job 完成后运行,把 manifest 上传到同一 release / `publish-manifest` job uploads both manifests after build.
+
+### Changed 改进
+
+- `tauri.conf.json` 新增 `bundle.createUpdaterArtifacts: true` 让 Tauri 在每个平台产出可签名的 updater bundle / Added `bundle.createUpdaterArtifacts: true` so Tauri emits signable updater bundles per OS.
+- 修正 `releaseNotes.ts` 中过时的仓库 URL (旧 `IEC104Sim` 已失效) / Fixed stale repo URL in `releaseNotes.ts` (`IEC104Sim` is gone).
+- 失败兜底:网络不可达、json 404、解析失败、验签失败一律 `log::warn!` + 返回 None,不打扰用户 / All failure modes (network down, JSON 404, signature mismatch) silently log and return `None` — never popup an error.
+
+### Fixed 修复
+
+- 自上一个正式 release v1.0.8 以来,v1.0.9 → v1.0.15 共 7 个 patch 在追 CI 链路 (sig 上传、bundle 命名、manifest 正则适配 Tauri 2 真实产物名),此版本作为正式收口 / Auto-update CI plumbing fixed across 7 iterative patches (v1.0.9–v1.0.15); this minor release rolls them up.
+
+### Internal 内部
+
+- spec & plan 写在 `docs/superpowers/specs/2026-04-28-tauri-auto-update-design.md` 与 `docs/superpowers/plans/2026-04-28-tauri-auto-update.md`。
+
+### Upgrade Notes / 升级说明
+
+- v1.0.8 及更早的用户**需要手动升级一次**到 v1.1.0 (老版本没有 updater 客户端代码)。从 v1.1.0 起,后续版本将自动收到推送。
+- v1.0.9 → v1.0.15 的用户也建议手动升一次到 v1.1.0 以使用稳定的 updater 链路 (那几个 patch 里多次 CI 失败,部分版本的 release 资产可能不全)。
+
+### Known Limitations / 已知限制
+
+- **主站**: 多 CA 场景下右键单点控制命令仍然只发到连接的第一个 CA (数据点未携带 CA 信息) / Right-click control commands target the first CA only in multi-CA setups (data points don't carry CA info).
+- macOS 应用未做公证 / macOS bundles aren't notarized — 在新版 macOS 上首次运行可能被 Gatekeeper 拦下,需要用户在系统偏好设置 → 安全性中允许。
+
 ## [1.0.15] - 2026-04-28
 
 ### 修复

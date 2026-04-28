@@ -1,11 +1,11 @@
 export const APP_NAME = 'IEC104 Master'
-export const REPO_URL = 'https://github.com/kelsoprotein-lab/IEC104Sim'
-export const RELEASES_URL = 'https://github.com/kelsoprotein-lab/IEC104Sim/releases'
+export const REPO_URL = 'https://github.com/kelsoprotein-lab/IEC60870-5-104-Simulator'
+export const RELEASES_URL = 'https://github.com/kelsoprotein-lab/IEC60870-5-104-Simulator/releases'
 
 // Keep in sync with CHANGELOG.md — see `release` skill.
 export const RELEASE_NOTES: string[] = [
-  '新增: UI 支持中英文运行时切换 (工具栏 中/EN 按钮一键切换,首次启动跟随系统语言并持久化)',
-  '新增: 通信日志详情列改前端字典渲染,切换语言时已显示日志立即随之更新',
-  '新增: 日志 CSV 导出改前端实现,跟随当前 UI 语言',
-  '改进: 核心库 LogEntry 增加可选 detail_event 字段 (向后兼容)',
+  '新增: 应用内自动更新 — 启动时静默检查 GitHub Releases, 发现新版本弹窗提示, 用户确认后下载并自动重启 (ed25519 验签, 6 小时节流, "稍后" 24 小时不重提)',
+  '新增: 一个连接支持多个公共地址 (CA) — "新建连接" 对话框输入逗号分隔的列表 (例如 1, 2, 3), 自动 GI / 时钟同步 / 累计量召唤按 CA 列表循环, 连接树显示 CA:1,2,3',
+  '改进: 修正 GitHub 仓库链接 (旧链接 IEC104Sim 已失效, 改为 IEC60870-5-104-Simulator)',
+  '已知限制: 多 CA 场景下右键单点控制命令仅发到连接的第一个 CA (数据点未携带 CA 信息)',
 ]
