@@ -71,7 +71,6 @@ jobs:
           releaseBody: 'See the assets below to download the installers for your platform.'
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: false
           args: ${{ matrix.args }}
 
       - name: Debug bundle contents
@@ -177,7 +176,6 @@ jobs:
           releaseBody: 'See the assets below to download the installers for your platform.'
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: false
           args: ${{ matrix.args }}
 
       - name: Debug bundle contents
