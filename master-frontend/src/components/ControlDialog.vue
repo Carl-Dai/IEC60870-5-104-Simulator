@@ -61,13 +61,18 @@ watch(commandType, () => {
 })
 
 const currentValueStr = computed(() => {
+  // Coerce to string in every branch — backend expects `value: String` and
+  // Vue's v-model on <input type="number"> can yield a JS number depending
+  // on the entered text (e.g. typing "123" into a setpoint field), which
+  // then fails serde deserialization with
+  //   invalid type: integer `123`, expected a string
   switch (commandType.value) {
-    case 'single': return singleValue.value
-    case 'double': return doubleValue.value
-    case 'step': return stepValue.value
-    case 'setpoint_normalized': return normalizedValue.value
-    case 'setpoint_scaled': return scaledValue.value
-    case 'setpoint_float': return floatValue.value
+    case 'single': return String(singleValue.value)
+    case 'double': return String(doubleValue.value)
+    case 'step': return String(stepValue.value)
+    case 'setpoint_normalized': return String(normalizedValue.value)
+    case 'setpoint_scaled': return String(scaledValue.value)
+    case 'setpoint_float': return String(floatValue.value)
     case 'bitstring': return String(bitstringValue.value)
   }
 })
