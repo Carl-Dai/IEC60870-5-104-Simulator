@@ -2,6 +2,11 @@
 
 本项目的所有重要变更记录在此文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## 1.0.9 (待发布)
+
+- feat: 新增应用内自动更新（启动时静默检查 GitHub Releases，发现新版本时弹窗提示）
+- 已发布的旧版本（含 1.0.8）需要手动升级一次到 1.0.9，之后将自动收到后续更新
+
 ## [1.0.8] - 2026-04-28
 
 ### 新增
