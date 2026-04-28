@@ -5,11 +5,15 @@ import { resolve } from 'node:path'
 
 const REPO = 'kelsoprotein-lab/IEC60870-5-104-Simulator'
 
+// Tauri 2 with bundle.createUpdaterArtifacts: true publishes:
+//   - macOS: <name>_<arch>.app.tar.gz (no version in name)
+//   - Linux: <name>_<ver>_amd64.AppImage  (the AppImage itself, NOT a tar.gz)
+//   - Windows: <name>_<ver>_x64-setup.exe (the NSIS installer itself, NOT a .nsis.zip)
 const PLATFORM_PATTERNS = [
-  { key: 'darwin-aarch64', re: /aarch64\.app\.tar\.gz$/ },
-  { key: 'darwin-x86_64',  re: /x64\.app\.tar\.gz$/ },
-  { key: 'windows-x86_64', re: /x64-setup\.nsis\.zip$/ },
-  { key: 'linux-x86_64',   re: /amd64\.AppImage\.tar\.gz$/ },
+  { key: 'darwin-aarch64', re: /_aarch64\.app\.tar\.gz$/ },
+  { key: 'darwin-x86_64',  re: /_x64\.app\.tar\.gz$/ },
+  { key: 'windows-x86_64', re: /_x64-setup\.exe$/ },
+  { key: 'linux-x86_64',   re: /_amd64\.AppImage$/ },
 ]
 
 export function groupAssetsByRole(assets) {

@@ -59,7 +59,6 @@ jobs:
         working-directory: frontend
 
       - uses: tauri-apps/tauri-action@v0
-        id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -72,47 +71,6 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
-
-      - name: Debug bundle contents
-        shell: bash
-        run: |
-          echo "PWD: $(pwd)"
-          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
-          echo "---find target -name *.tar.gz/.zip/.sig---"
-          find target -type f \( -name "*.tar.gz" -o -name "*.tar.gz.sig" -o -name "*.zip" -o -name "*.zip.sig" \) 2>/dev/null | head -40 || true
-
-      - name: Upload updater artifacts (sig + bundles)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          case "${{ runner.os }}" in
-            macOS)
-              case "${{ matrix.rust_target }}" in
-                aarch64-apple-darwin) arch="aarch64" ;;
-                x86_64-apple-darwin) arch="x64" ;;
-              esac
-              find target -type f -name "*.app.tar.gz.sig" -path "*/release/bundle/macos/*" 2>/dev/null | while IFS= read -r sig; do
-                stem=$(basename "$sig" .app.tar.gz.sig)
-                renamed="/tmp/${stem}_${arch}.app.tar.gz.sig"
-                cp "$sig" "$renamed"
-                echo "Uploading $renamed"
-                gh release upload "${{ github.ref_name }}" "$renamed" --clobber --repo "${{ github.repository }}"
-              done
-              ;;
-            Linux)
-              find target -type f \( -name "IEC104*.AppImage.tar.gz" -o -name "IEC104*.AppImage.tar.gz.sig" \) -path "*/release/bundle/appimage/*" 2>/dev/null | while IFS= read -r f; do
-                echo "Uploading $f"
-                gh release upload "${{ github.ref_name }}" "$f" --clobber --repo "${{ github.repository }}"
-              done
-              ;;
-            Windows)
-              find target -type f \( -name "IEC104*.nsis.zip" -o -name "IEC104*.nsis.zip.sig" \) -path "*/release/bundle/nsis/*" 2>/dev/null | while IFS= read -r f; do
-                echo "Uploading $f"
-                gh release upload "${{ github.ref_name }}" "$f" --clobber --repo "${{ github.repository }}"
-              done
-              ;;
-          esac
 
   build-master:
     strategy:
@@ -164,7 +122,6 @@ jobs:
         working-directory: master-frontend
 
       - uses: tauri-apps/tauri-action@v0
-        id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -177,47 +134,6 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
-
-      - name: Debug bundle contents
-        shell: bash
-        run: |
-          echo "PWD: $(pwd)"
-          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
-          echo "---find target -name *.tar.gz/.zip/.sig---"
-          find target -type f \( -name "*.tar.gz" -o -name "*.tar.gz.sig" -o -name "*.zip" -o -name "*.zip.sig" \) 2>/dev/null | head -40 || true
-
-      - name: Upload updater artifacts (sig + bundles)
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          case "${{ runner.os }}" in
-            macOS)
-              case "${{ matrix.rust_target }}" in
-                aarch64-apple-darwin) arch="aarch64" ;;
-                x86_64-apple-darwin) arch="x64" ;;
-              esac
-              find target -type f -name "*.app.tar.gz.sig" -path "*/release/bundle/macos/*" 2>/dev/null | while IFS= read -r sig; do
-                stem=$(basename "$sig" .app.tar.gz.sig)
-                renamed="/tmp/${stem}_${arch}.app.tar.gz.sig"
-                cp "$sig" "$renamed"
-                echo "Uploading $renamed"
-                gh release upload "${{ github.ref_name }}" "$renamed" --clobber --repo "${{ github.repository }}"
-              done
-              ;;
-            Linux)
-              find target -type f \( -name "IEC104*.AppImage.tar.gz" -o -name "IEC104*.AppImage.tar.gz.sig" \) -path "*/release/bundle/appimage/*" 2>/dev/null | while IFS= read -r f; do
-                echo "Uploading $f"
-                gh release upload "${{ github.ref_name }}" "$f" --clobber --repo "${{ github.repository }}"
-              done
-              ;;
-            Windows)
-              find target -type f \( -name "IEC104*.nsis.zip" -o -name "IEC104*.nsis.zip.sig" \) -path "*/release/bundle/nsis/*" 2>/dev/null | while IFS= read -r f; do
-                echo "Uploading $f"
-                gh release upload "${{ github.ref_name }}" "$f" --clobber --repo "${{ github.repository }}"
-              done
-              ;;
-          esac
 
   publish-manifest:
     needs: [build-slave, build-master]

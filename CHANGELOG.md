@@ -2,6 +2,14 @@
 
 本项目的所有重要变更记录在此文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.0.15] - 2026-04-28
+
+### 修复
+- **CI**: v1.0.14 验证发现 Tauri 2 + tauri-action 在默认配置下已经把所有 `*.sig` 文件、macOS `.app.tar.gz`、Linux `.AppImage`、Windows `.exe` 都正确上传到了 release —— 我们之前自己写的 explicit upload step 完全冗余,并且基于错误的文件名假设(找 `.AppImage.tar.gz` / `.nsis.zip`,而 Tauri 2 实际产物是 `.AppImage` / `-setup.exe`)。本版本删除冗余 upload step,把 `gen-update-manifest.mjs` 的正则改成匹配 Tauri 2 真实产物名,vitest 加了"不能误匹配 .dmg/.msi/.deb/.rpm"的回归测试。
+
+### 备注
+- v1.0.14 release 里有一个 tauri-action 自动生成的 `latest.json` —— 它把 slave/master 混在一起所以不可用,但我们的 updater 端点指向的是 `latest-slave.json` / `latest-master.json`,所以无影响。`latest.json` 留在 release 里作为无害噪声。
+
 ## [1.0.14] - 2026-04-28
 
 ### 修复
