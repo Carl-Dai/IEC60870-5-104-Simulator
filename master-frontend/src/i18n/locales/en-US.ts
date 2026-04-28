@@ -178,6 +178,7 @@ const dict: DictShape = {
   control: {
     title: 'Send Control Command',
     targetCa: 'Target Common Address (CA)',
+    caCustom: 'Other (custom...)',
     ioa: 'IOA (Information Object Address)',
     commandType: 'Command Type',
     cmdSingle: 'Single Command (C_SC_NA_1)',

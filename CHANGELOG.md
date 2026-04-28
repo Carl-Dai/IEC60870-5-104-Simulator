@@ -2,6 +2,45 @@
 
 本项目的所有重要变更记录在此文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [1.1.1] - 2026-04-28
+
+> 围绕 v1.1.0 的多 CA 能力做了完整的数据面 + 操作面收尾,并修复了 master 上一个老 bug。Patch release,任何 v1.0.9+ 的用户都可自动收到。
+
+### Highlights / 亮点
+
+- 🗂️ 主站数据按 CA 真隔离 / Master data is now physically per-CA — 之前 `(IOA, AsduType)` 扁平存储让多站共连接的同 IOA 互相覆盖,现在改成 `HashMap<CA, DataPointMap>`,各站独立。
+- 🌳 多 CA 的连接树自动展开成 **连接 → CA 徽章 → 分类** 三层 / Tree expands to **Connection → CA badge → category** for multi-CA setups (single-CA stays flat). 每个 CA 节点的分类计数独立统计。
+- 🎛️ 工具栏新增 **自定义控制 / Custom Control** 入口 — 不必先选数据点,直接弹 ControlDialog,CA 字段是当前连接已配置 CAs 的下拉选 (有需要可切到"其他"手动输入)。
+- 💾 ControlDialog 记忆 CA / IOA / 命令类型 / 值字段 (持久化到 localStorage) / ControlDialog now remembers CA/IOA/command-type/value across opens & restarts — 发送成功不再自动关窗,允许用户连续给同 CA 不同 IOA 发命令。
+- 🔌 修复:TLS 模式下点"断开"前端永远停在 Connected 的老 bug / Fixed the TLS-disconnect hang where the UI stayed on Connected because the receiver task never exited from a blocking read.
+
+### Added 新增
+
+- **主站后端**: 新类型 `MasterReceivedData = HashMap<u16, DataPointMap>` + 连接级单调 seq;`parse_and_store_asdu` 取 ASDU 头里的 CA 路由到对应桶 / New `MasterReceivedData` per-CA storage with connection-wide seq counter, points routed by ASDU CA header.
+- **主站后端**: `ReceivedDataPointInfo.common_address` 字段,前端可按 CA 过滤/分组/路由控制命令 / `ReceivedDataPointInfo` carries `common_address` so the UI can filter, group, and route control commands correctly.
+- **主站前端**: `App.vue` 增加 `selectedCA: number | null` 共享状态;`categoryCounts` 形状改成 connId → Map<CA, Map<category, count>> / `selectedCA` shared state; per-CA category counts.
+- **主站前端**: `ConnectionTree` 检测 `common_addresses.length > 1` 时渲染 CA 徽章子节点 + 各自展开/收起;`DataTable` 按 selectedCA × selectedCategory 双重过滤 / Tree renders CA badges with independent expand/collapse; data table filters by both CA and category.
+- **主站前端**: 工具栏新按钮 **自定义控制**,打开 ControlDialog,IOA 留空,CA 默认当前连接首个 / Toolbar **Custom Control** button; CA defaults to the connection's first configured one.
+- **主站前端**: ControlDialog CA 字段在多 CA 连接下变成下拉 (CA 1 / CA 2 / CA 3 / 其他...);单 CA 连接保持原数字输入 / CA dropdown listing the connection's CAs in multi-CA setups, with an "Other (custom)" escape hatch.
+
+### Changed 改进
+
+- **主站前端**: `ValuePanel` / `DataTable` 右键控制命令直接用数据点自身的 `common_address` (该点真实来源的站),不再去 list_connections 取"第一个 CA" / Right-click control commands now use each point's own CA (its source station) instead of the connection's first CA.
+- **主站前端**: ControlDialog 全部输入字段持久化到 `localStorage` (key `iec104master.controlDialog.v1`) / All ControlDialog inputs persist via localStorage.
+- **主站前端**: ControlDialog 发送成功后不再自动关闭;`Toolbar` 与 `DataTable` 移除 `@sent` 关闭句柄,确认看下方 OK Xms 指示 / Dialog stays open after a successful send; confirmation comes from the existing OK indicator.
+- **CI**: `gen-update-manifest.mjs::extractChangelogSection` 同时识别 `## X.Y.Z` 与 `## [X.Y.Z]` 两种风格 / Changelog section extractor recognizes both `##` styles.
+- **CI**: 新 `scripts/build-release-notes.mjs` (含 vitest) 在 publish-manifest job 末尾自动把 GitHub Release body 替换成 per-OS 下载表 + 本版本 CHANGELOG section,告别"See the assets below..."占位符 / CI auto-replaces the Release body with a rich, per-platform table + the version's CHANGELOG entry.
+
+### Fixed 修复
+
+- **主站后端**: `MasterConnection::disconnect()` 给 `receiver_handle.await` 包了 `tokio::time::timeout(2s)`,TLS 路径下即使 read 没透出 timeout 也不会让 Tauri 命令挂死 / `disconnect()` caps the receiver join at 2 s so a stuck blocking read can't hang the command.
+- **主站前端**: `Toolbar::disconnectMaster` 的 `selectedConnectionState = 'Disconnected'` 移到 `finally` 块;后端返回 NotConnected (对端已关 socket) 也不再让按钮卡在 Connected,降级为静默 / Disconnect button always reflects intent in `finally`; benign `NotConnected` is silenced.
+- **主站前端**: ControlDialog `value` 字段强制 `String()` 包一层,修 `<input type="number">` 在某些路径下让 v-model 拿到 JS number 导致后端报 `invalid type: integer 123, expected a string` / Force-stringify `value` so a numeric setpoint input doesn't fail serde deserialization on the Rust side.
+
+### Internal 内部
+
+- 类型 `ReceivedDataPointInfo`、`ConnectionInfo` 在前后端同步更新;`pointKey` 加入 CA 防止前端缓存跨站碰撞。
+
 ## [1.1.0] - 2026-04-28
 
 > 把 v1.0.9 → v1.0.15 这一系列搭建自动更新链路的工作正式收尾,作为面向用户的 minor release。

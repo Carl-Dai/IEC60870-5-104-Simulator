@@ -4,8 +4,11 @@ export const RELEASES_URL = 'https://github.com/kelsoprotein-lab/IEC60870-5-104-
 
 // Keep in sync with CHANGELOG.md — see `release` skill.
 export const RELEASE_NOTES: string[] = [
-  '新增: 应用内自动更新 — 启动时静默检查 GitHub Releases, 发现新版本弹窗提示, 用户确认后下载并自动重启 (ed25519 验签, 6 小时节流, "稍后" 24 小时不重提)',
-  '新增: 一个连接支持多个公共地址 (CA) — "新建连接" 对话框输入逗号分隔的列表 (例如 1, 2, 3), 自动 GI / 时钟同步 / 累计量召唤按 CA 列表循环, 连接树显示 CA:1,2,3',
-  '改进: 修正 GitHub 仓库链接 (旧链接 IEC104Sim 已失效, 改为 IEC60870-5-104-Simulator)',
-  '已知限制: 多 CA 场景下右键单点控制命令仅发到连接的第一个 CA (数据点未携带 CA 信息)',
+  '新增: 主站数据按公共地址 (CA) 真隔离 — 同一连接下不同站的同 IOA 不再相互覆盖',
+  '新增: 多 CA 连接树自动展开为 连接 → CA 徽章 → 分类 三层, 各 CA 计数独立',
+  '新增: 工具栏增加 "自定义控制" 按钮, 不必先选数据点; CA 字段下拉选当前连接已配置 CAs',
+  '新增: 控制对话框记忆 CA / IOA / 命令类型 / 值 (持久化), 发送成功不再自动关闭, 可连续发命令',
+  '改进: 右键控制命令直接用数据点自身的 CA, 多 CA 场景路由正确',
+  '修复: TLS 模式下点 "断开" 前端永远停在 Connected 的老 bug',
+  '修复: 设定值字段输入数字导致 "invalid type: integer ... expected a string" 的报错',
 ]

@@ -194,6 +194,46 @@ function handleKeydown(e: KeyboardEvent) {
     send()
   }
 }
+
+// Pull the configured Common Addresses for the current connection so the
+// CA field can offer a dropdown instead of forcing free-form numeric
+// entry. Cached per-connection for the lifetime of the dialog session;
+// re-queried whenever the dialog is opened against a different connection
+// (the user might have created or edited a connection in between).
+const availableCAs = ref<number[]>([])
+async function loadAvailableCAs() {
+  if (!props.connectionId) { availableCAs.value = []; return }
+  try {
+    const conns = await invoke<{ id: string; common_addresses: number[] }[]>('list_connections')
+    const conn = conns.find((c) => c.id === props.connectionId)
+    availableCAs.value = conn?.common_addresses?.slice() ?? []
+  } catch {
+    availableCAs.value = []
+  }
+}
+watch(() => [props.visible, props.connectionId] as const, ([v]) => {
+  if (v) loadAvailableCAs()
+})
+
+// Show the CA as a `<select>` only when the connection has more than one
+// configured CA. Single-CA setups stay with the simpler number input.
+const useCASelect = computed(() => availableCAs.value.length > 1)
+
+// Special sentinel for "I want to type a CA that's not in the list".
+const CUSTOM_CA = -1
+
+// What `<option value>` to show as selected. If the persisted CA isn't in
+// the list, we pin the dropdown to "Custom" so the number input appears.
+const caSelectValue = computed<number>({
+  get: () => availableCAs.value.includes(ca.value) ? ca.value : CUSTOM_CA,
+  set: (v: number) => {
+    if (v === CUSTOM_CA) {
+      // Switching to custom — leave ca.value as-is so the user keeps editing it
+      return
+    }
+    ca.value = v
+  },
+})
 </script>
 
 <template>
@@ -205,7 +245,22 @@ function handleKeydown(e: KeyboardEvent) {
           <div class="form-row">
             <label class="form-label form-label-half">
               {{ t('control.targetCa') }}
-              <input v-model.number="ca" class="form-input" type="number" min="1" max="65534" />
+              <template v-if="useCASelect">
+                <select v-model.number="caSelectValue" class="form-input">
+                  <option v-for="opt in availableCAs" :key="opt" :value="opt">CA {{ opt }}</option>
+                  <option :value="CUSTOM_CA">{{ t('control.caCustom') }}</option>
+                </select>
+                <input
+                  v-if="caSelectValue === CUSTOM_CA"
+                  v-model.number="ca"
+                  class="form-input"
+                  type="number"
+                  min="1"
+                  max="65534"
+                  style="margin-top: 4px"
+                />
+              </template>
+              <input v-else v-model.number="ca" class="form-input" type="number" min="1" max="65534" />
             </label>
             <label class="form-label form-label-half">
               {{ t('control.ioa') }}

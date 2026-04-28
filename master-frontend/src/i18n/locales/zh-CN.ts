@@ -135,6 +135,7 @@ export type DictShape = {
   control: {
     title: string
     targetCa: string
+    caCustom: string
     ioa: string
     commandType: string
     cmdSingle: string
@@ -384,6 +385,7 @@ const dict: DictShape = {
   control: {
     title: '发送控制命令',
     targetCa: '目标公共地址 (CA)',
+    caCustom: '其他 (手动输入)',
     ioa: 'IOA (信息对象地址)',
     commandType: '命令类型',
     cmdSingle: '单点命令 (C_SC_NA_1)',
