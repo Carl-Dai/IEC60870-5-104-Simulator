@@ -2,16 +2,20 @@
 
 本项目的所有重要变更记录在此文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [1.0.13] - 2026-04-28
+## [1.0.14] - 2026-04-28
 
 ### 修复
-- **CI**: v1.0.12 的 debug step 揭示根因:`bundle.targets: "all"` 在 Tauri 2 中**不包含** `updater`,所以 Linux/Windows 根本没生成 updater bundle (`.AppImage.tar.gz` / `.nsis.zip`);同时 `includeUpdaterJson: false` 让 tauri-action 跳过了对生成的 bundle 的签名步骤。本版本把 `bundle.targets` 改成显式列表加上 `"updater"`,并去掉 `includeUpdaterJson: false`,让 tauri-action 走默认路径完成签名;我们的 find-based upload step 仍然负责把 sig + updater bundle 上传到 release(因为 tauri-action 自己在多 app 同 tag 场景下会跳过这部分上传)。
+- **CI**: v1.0.13 试图把 `"updater"` 放进 `bundle.targets` 数组,被 Tauri 2.10 schema 拒绝(`BundleTargetInner` 不接受这个值)。本版本改用正确的字段:`bundle.createUpdaterArtifacts: true`,Tauri 会按当前 OS 自动产出对应的 updater bundle(`.app.tar.gz` / `.AppImage.tar.gz` / `.nsis.zip`)并签名。同时去掉 `includeUpdaterJson: false`,让 tauri-action 走默认路径完成签名;find-based upload step 仍然负责把 sig + updater bundle 上传到 release。
 
 ### 新增
 - **主站**: 一个连接支持多个公共地址 (CA)。在"新建连接"对话框的"公共地址 (CA)"字段输入逗号分隔的列表(例如 `1, 2, 3`),应用会在连接成功后对每个 CA 各发一次 GI;时钟同步、累计量召唤同样按列表循环。连接树显示 `CA:1,2,3`。
 
 ### 已知限制
 - **主站**: 右键单点控制命令仍然只发到连接的第一个 CA(数据点未携带 CA 信息)。多 CA 且 IOA 重叠的场景下命令的目标可能不符合用户预期。
+
+## [1.0.13] - 2026-04-28 (broken — no release artifacts)
+
+CI build 失败:`bundle.targets` 里的 `"updater"` 被 Tauri 2.10 schema 拒绝。修复见 v1.0.14。
 
 ## [1.0.12] - 2026-04-28
 
